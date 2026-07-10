@@ -9,7 +9,9 @@ description = "Loom wire protocol: datagram + control CBOR encode/decode, reasse
 name = "loom_proto"
 path = "src/lib.rs"
 
-# The `vector-adapter` bin target is added in Stage 3.
+[[bin]]
+name = "vector-adapter"
+path = "src/bin/vector-adapter.rs"
 
 [dependencies]
 thiserror.workspace = true
