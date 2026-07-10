@@ -1,0 +1,21 @@
+[package]
+name = "loom-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Loom wire protocol: datagram + control CBOR encode/decode, reassembly, clock sync, keymap. No I/O, no async, no QUIC types."
+
+[lib]
+name = "loom_proto"
+path = "src/lib.rs"
+
+# The `vector-adapter` bin target is added in Stage 3.
+
+[dependencies]
+thiserror.workspace = true
+ciborium.workspace = true
+half.workspace = true
+# Used only by the vector-adapter bin (and tests) for JSON I/O and hex — the
+# library modules themselves do no I/O and never touch these.
+serde_json.workspace = true
+hex.workspace = true
