@@ -17,6 +17,7 @@ pub mod clocksync;
 pub mod control;
 pub mod datagram;
 pub mod error;
+pub mod errors;
 pub mod keymap;
 pub mod reassembly;
 
