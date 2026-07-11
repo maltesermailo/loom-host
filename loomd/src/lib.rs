@@ -13,6 +13,7 @@
 
 pub mod conn;
 pub mod endpoint;
+pub mod media;
 pub mod session;
 pub mod tls;
 
