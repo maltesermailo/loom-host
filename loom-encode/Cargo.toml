@@ -3,5 +3,14 @@ name = "loom-encode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Video encode: software HEVC via libx265 (M1.2). NVENC/VideoToolbox backends land later."
 
 [dependencies]
+thiserror.workspace = true
+
+[build-dependencies]
+# libx265 has a large C struct API; bindgen generates it from the Homebrew
+# headers located via pkg-config. cc compiles the one-line version-macro shim.
+bindgen = "0.70"
+pkg-config = "0.3"
+cc = "1"
