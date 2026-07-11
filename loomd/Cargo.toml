@@ -6,3 +6,8 @@ license.workspace = true
 
 [dependencies]
 loom-proto = { path = "../loom-proto" }
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+clap.workspace = true
