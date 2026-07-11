@@ -97,6 +97,9 @@ impl HevcEncoder {
                 return Err(EncodeError::Preset("ultrafast/zerolatency".into()));
             }
 
+            // Silence libx265's own stderr chatter so it doesn't pollute the
+            // daemon's structured JSON logs (also on stderr).
+            (*param).logLevel = ffi::X265_LOG_NONE;
             (*param).sourceWidth = cfg.width as i32;
             (*param).sourceHeight = cfg.height as i32;
             (*param).fpsNum = cfg.fps_num;
