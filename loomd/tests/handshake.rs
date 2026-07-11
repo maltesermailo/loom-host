@@ -32,7 +32,14 @@ fn spawn_host() -> SocketAddr {
     let bound = server.local_addr().expect("local addr");
     let cfg = HostCfg {
         name: "test-host".into(),
-        params: MediaParams::default(),
+        // Small frames keep these handshake tests light — they reach STREAMING,
+        // which now spawns the real encoder/media thread.
+        params: MediaParams {
+            width: 320,
+            height: 240,
+            ..MediaParams::default()
+        },
+        drop_percent: 0,
     };
     // Mirror endpoint::accept_loop but keep the handle-per-conn behaviour under
     // the test's own semaphore so BUSY is exercised exactly as in production.

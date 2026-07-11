@@ -19,6 +19,7 @@ use loom_proto::cbor::Value;
 use loom_proto::control::{self, Decoded};
 use loom_proto::errors;
 
+use crate::media::{self, MediaHandle};
 use crate::session::{HostSession, MediaParams, Output, State};
 
 /// Immutable per-daemon settings handed to each connection.
@@ -28,6 +29,8 @@ pub struct HostCfg {
     pub name: String,
     /// Media parameters advertised in CONFIG.
     pub params: MediaParams,
+    /// Dev datagram-loss injection percentage (`--drop-percent`; 0 = none).
+    pub drop_percent: u32,
 }
 
 /// Accept and drive one inbound connection to completion. Never panics; logs
@@ -58,8 +61,23 @@ pub async fn handle(incoming: quinn::Incoming, slot: Arc<Semaphore>, cfg: HostCf
     drop(permit);
 }
 
-/// Drive the session state machine over the accepted control stream.
+/// Drive the session state machine over the accepted control stream, owning the
+/// media thread's lifetime so it is always joined on exit.
 async fn run_session(connection: &Connection, cfg: &HostCfg) -> std::io::Result<()> {
+    let mut media: Option<MediaHandle> = None;
+    let result = session_loop(connection, cfg, &mut media).await;
+    if let Some(m) = media.take() {
+        // The connection is closed by now, so the media thread stops promptly.
+        m.join();
+    }
+    result
+}
+
+async fn session_loop(
+    connection: &Connection,
+    cfg: &HostCfg,
+    media: &mut Option<MediaHandle>,
+) -> std::io::Result<()> {
     // The client opens exactly one bidirectional stream: the control stream.
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -74,7 +92,7 @@ async fn run_session(connection: &Connection, cfg: &HostCfg) -> std::io::Result<
                 Ok(decoded) => {
                     log_incoming(&decoded);
                     let outputs = session.on_frame(decoded);
-                    if drive(&mut send, connection, outputs).await? {
+                    if drive(&mut send, connection, cfg, media, outputs).await? {
                         return Ok(());
                     }
                 }
@@ -103,6 +121,8 @@ async fn run_session(connection: &Connection, cfg: &HostCfg) -> std::io::Result<
 async fn drive(
     send: &mut SendStream,
     connection: &Connection,
+    cfg: &HostCfg,
+    media: &mut Option<MediaHandle>,
     outputs: Vec<Output>,
 ) -> std::io::Result<bool> {
     for out in outputs {
@@ -111,8 +131,13 @@ async fn drive(
                 send_frame(send, msg_type, &body).await?;
             }
             Output::StartMedia => {
-                // TODO(M1.2): kick off the synthetic media path here.
-                eprintln!("[conn] START sent — media path begins in M1.2");
+                // Spawn the synthetic media pipeline on its own thread (§5 / M1.2).
+                *media = Some(media::spawn(connection.clone(), cfg.params, cfg.drop_percent));
+            }
+            Output::RequestIdr => {
+                if let Some(m) = media.as_ref() {
+                    m.request_idr();
+                }
             }
             Output::Close { code } => {
                 let _ = send.finish();

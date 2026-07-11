@@ -28,11 +28,27 @@ struct Args {
     /// authenticate peers, so without this flag loomd refuses to serve.
     #[arg(long)]
     insecure_dev: bool,
+
+    /// Dev only: drop this percentage of outgoing media datagrams (deterministic,
+    /// seeded) to exercise the freeze→IDR_REQUEST→recovery path. 0 = none.
+    #[arg(long, default_value_t = 0)]
+    drop_percent: u32,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), BoxErr> {
     let args = Args::parse();
+
+    // Structured JSON logs on stderr (the M1.2 recovery test + future latency
+    // tooling parse these). RUST_LOG overrides the default info level.
+    tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
 
     if !args.insecure_dev {
         eprintln!("loomd: refusing to serve without --insecure-dev.");
@@ -54,6 +70,7 @@ async fn main() -> Result<(), BoxErr> {
     let cfg = HostCfg {
         name: args.name,
         params: MediaParams::default(),
+        drop_percent: args.drop_percent,
     };
     endpoint::accept_loop(endpoint, cfg).await;
     Ok(())

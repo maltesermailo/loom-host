@@ -71,6 +71,9 @@ pub enum Output {
     },
     /// START has been emitted; media may begin. Wired to the encoder in M1.2.
     StartMedia,
+    /// The client asked for a fresh IDR (§3.6). The driver forwards this to the
+    /// running encoder, which codes the next frame as an IDR.
+    RequestIdr,
     /// Flush pending sends, then close the QUIC connection with `code`
     /// (`errors::NONE` for a clean BYE-driven close).
     Close {
@@ -145,8 +148,19 @@ impl HostSession {
         match self.state {
             State::WaitHello => self.on_hello(msg_type, &body),
             State::WaitConfigAck => self.on_config_ack(msg_type, &body),
-            State::Streaming => self.protocol_violation(), // no C→H setup msgs here yet
+            State::Streaming => self.on_streaming(msg_type),
             State::Closed => Vec::new(),
+        }
+    }
+
+    /// Streaming-phase client→host messages (§3.3).
+    fn on_streaming(&mut self, msg_type: u64) -> Vec<Output> {
+        match msg_type {
+            control::IDR_REQUEST => vec![Output::RequestIdr],
+            // STATS (M1.3) and INPUT (M4) are valid streaming messages we do not
+            // act on yet; ignore rather than mis-flag a violation.
+            control::STATS | control::INPUT => Vec::new(),
+            _ => self.protocol_violation(),
         }
     }
 
@@ -361,6 +375,27 @@ mod tests {
         let out = s.on_frame(msg(control::BYE, vec![(0, Value::Int(0))]));
         assert_eq!(out, vec![Output::Close { code: errors::NONE }]);
         assert_eq!(s.state(), State::Closed);
+    }
+
+    #[test]
+    fn idr_request_while_streaming_asks_encoder() {
+        let mut s = new_session();
+        s.on_frame(hello(1, vec![1]));
+        s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        assert_eq!(s.state(), State::Streaming);
+        let out = s.on_frame(msg(control::IDR_REQUEST, vec![(0, Value::Int(0))]));
+        assert_eq!(out, vec![Output::RequestIdr]);
+        assert_eq!(s.state(), State::Streaming);
+    }
+
+    #[test]
+    fn stats_and_input_tolerated_while_streaming() {
+        let mut s = new_session();
+        s.on_frame(hello(1, vec![1]));
+        s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        assert!(s.on_frame(msg(control::STATS, vec![(0, Value::Int(1))])).is_empty());
+        assert!(s.on_frame(msg(control::INPUT, vec![(0, Value::Int(0))])).is_empty());
+        assert_eq!(s.state(), State::Streaming);
     }
 
     #[test]
