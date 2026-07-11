@@ -86,6 +86,38 @@ impl DatagramHeader {
     }
 }
 
+/// Maximum payload bytes per datagram (§2/§4): `1350 − 12` header.
+pub const MAX_PAYLOAD: usize = MAX_DATAGRAM_LEN - HEADER_LEN;
+
+/// Fragment a complete frame **body** into ordered datagrams (§4) — the
+/// send-side inverse of [`crate::reassembly`]. `body` is the logical frame body:
+/// for video that is `capture_ts (u64 BE) ‖ Annex-B access unit` (§4.1); the
+/// timestamp is part of the body and therefore lands only in fragment 0. Each
+/// returned datagram is a full header+payload buffer ≤ [`MAX_DATAGRAM_LEN`].
+///
+/// The body is split into `ceil(len / MAX_PAYLOAD)` fragments (at least one, so
+/// an empty body still yields a single well-formed datagram). `frag_count` is
+/// identical across the frame's fragments and `LAST_FRAGMENT` is set on the
+/// last, exactly as the receiver validates.
+pub fn fragment(stream_id: u16, frame_seq: u32, keyframe: bool, body: &[u8]) -> Vec<Vec<u8>> {
+    let frag_count = body.len().div_ceil(MAX_PAYLOAD).max(1);
+    let mut out = Vec::with_capacity(frag_count);
+    // `chunks` yields nothing for an empty slice, so handle that as one empty frag.
+    let mut chunks = body.chunks(MAX_PAYLOAD).peekable();
+    for idx in 0..frag_count {
+        let chunk = chunks.next().unwrap_or(&[]);
+        let header = DatagramHeader::new(
+            keyframe,
+            stream_id,
+            frame_seq,
+            idx as u16,
+            frag_count as u16,
+        );
+        out.push(header.encode(chunk));
+    }
+    out
+}
+
 /// Why a datagram was dropped on decode. All of these are *silent drops* in
 /// production (§6.6); the strings exist only for the conformance vectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -198,6 +230,49 @@ mod tests {
         assert_eq!(DatagramHeader::new(true, 0, 0, 2, 3).flags(), 0x03);
         // audio, not keyframe, single fragment => last only => 0x02.
         assert_eq!(DatagramHeader::new(false, 1, 7, 0, 1).flags(), 0x02);
+    }
+
+    #[test]
+    fn fragment_round_trips_through_decode_and_reassembly() {
+        use crate::reassembly::{Event, Fragment, Reassembler};
+
+        // A body spanning several fragments (2.5× the payload limit).
+        let body: Vec<u8> = (0..MAX_PAYLOAD * 2 + 5).map(|i| i as u8).collect();
+        let frames = fragment(0, 9, true, &body);
+        assert_eq!(frames.len(), 3);
+
+        let mut reassembled = vec![0u8; body.len()];
+        let mut r = Reassembler::new();
+        for (i, dg) in frames.iter().enumerate() {
+            let d = decode(dg).expect("valid datagram");
+            assert_eq!(d.header.frame_seq, 9);
+            assert_eq!(d.header.frag_count, 3);
+            assert!(d.header.keyframe);
+            // Copy this fragment's payload back into its slot to prove ordering.
+            let off = i * MAX_PAYLOAD;
+            let payload = &dg[HEADER_LEN..];
+            reassembled[off..off + payload.len()].copy_from_slice(payload);
+            r.push(0, Fragment {
+                frame_seq: d.header.frame_seq,
+                frag_index: d.header.frag_index,
+                frag_count: d.header.frag_count,
+                keyframe: d.header.keyframe,
+            });
+        }
+        assert_eq!(reassembled, body);
+        // The metadata state machine delivers exactly the one keyframe.
+        assert!(matches!(
+            r.events(),
+            [Event::Deliver { frame_seq: 9, keyframe: true, .. }]
+        ));
+    }
+
+    #[test]
+    fn fragment_empty_and_small_bodies() {
+        assert_eq!(fragment(1, 0, false, &[]).len(), 1); // one well-formed empty frag
+        let one = fragment(0, 1, false, &[1, 2, 3]);
+        assert_eq!(one.len(), 1);
+        assert!(decode(&one[0]).unwrap().header.last_fragment);
     }
 
     #[test]
