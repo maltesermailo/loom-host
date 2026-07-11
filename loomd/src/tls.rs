@@ -129,6 +129,12 @@ impl ClientCertVerifier for AcceptAnyClient {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         &[]
     }
+    // Dev stub: don't force clients to present a cert. Real mutual-TLS pinning
+    // (both sides authenticated) is TODO(M7); until then the msquic client
+    // connects without any client-cert plumbing.
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
     fn verify_client_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
