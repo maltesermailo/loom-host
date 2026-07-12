@@ -23,6 +23,14 @@ struct Args {
     #[arg(long, default_value = "loomd")]
     name: String,
 
+    /// Virtual display width in pixels (even). Default is the v1 bar (§2).
+    #[arg(long, default_value_t = 2560)]
+    width: u32,
+
+    /// Virtual display height in pixels (even).
+    #[arg(long, default_value_t = 1440)]
+    height: u32,
+
     /// Skip peer certificate verification. REQUIRED to accept any connection
     /// until certificate pinning lands in M7 — there is currently no way to
     /// authenticate peers, so without this flag loomd refuses to serve.
@@ -67,9 +75,15 @@ async fn main() -> Result<(), BoxErr> {
         loom_proto::PROTOCOL_VERSION
     );
 
+    let params = MediaParams {
+        width: args.width as u64,
+        height: args.height as u64,
+        ..MediaParams::default()
+    };
+
     let cfg = HostCfg {
         name: args.name,
-        params: MediaParams::default(),
+        params,
         drop_percent: args.drop_percent,
     };
     endpoint::accept_loop(endpoint, cfg).await;
