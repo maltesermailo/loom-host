@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# CI-style gate for loom-host. Runs the three checks that define "done":
-#   1. cargo test  --workspace                     (unit tests)
-#   2. cargo clippy --workspace --all-targets -Dwarnings
-#   3. vector-check <vector-adapter> spec/vectors  (all conformance vectors)
+# CI-style gate for loom-host. Runs the four checks that define "done":
+#   1. cargo fmt   --all --check                    (formatting)
+#   2. cargo test  --workspace                      (unit tests)
+#   3. cargo clippy --workspace --all-targets -Dwarnings
+#   4. vector-check <vector-adapter> spec/vectors   (all conformance vectors)
 #
 # The conformance harness and the vectors both come from the pinned spec
 # submodule, so this script is self-contained within the host repo.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "== [1/3] cargo test --workspace =="
+echo "== [1/4] cargo fmt --all --check =="
+cargo fmt --all --check
+
+echo "== [2/4] cargo test --workspace =="
 cargo test --workspace
 
-echo "== [2/3] cargo clippy --workspace --all-targets -D warnings =="
+echo "== [3/4] cargo clippy --workspace --all-targets -D warnings =="
 cargo clippy --workspace --all-targets -- -D warnings
 
-echo "== [3/3] conformance vectors =="
+echo "== [4/4] conformance vectors =="
 cargo build --quiet -p loom-proto --bin vector-adapter
 ADAPTER="$(pwd)/target/debug/vector-adapter"
 
