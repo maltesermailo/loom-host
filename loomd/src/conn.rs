@@ -139,6 +139,29 @@ async fn drive(
                     m.request_idr();
                 }
             }
+            Output::ClockPong { t0 } => {
+                // Stamp host receive/send times from the shared clock (§7). On
+                // loopback the receive→send gap is sub-µs, so t1 == t2 is fine.
+                let now = crate::clock::host_now_us() as i128;
+                send_frame(
+                    send,
+                    control::CLOCK_PONG,
+                    &[
+                        (Value::Int(0), Value::Int(t0 as i128)),
+                        (Value::Int(1), Value::Int(now)),
+                        (Value::Int(2), Value::Int(now)),
+                    ],
+                )
+                .await?;
+            }
+            Output::Stats(r) => {
+                tracing::info!(
+                    target: "loom::stats", event = "stats",
+                    frames_received = r.frames_received, frames_dropped = r.frames_dropped,
+                    datagrams = r.datagrams, jitter_ms = r.jitter_ms, decode_us = r.decode_us,
+                    rtt_us = r.rtt_us, e2e_us = r.e2e_us.unwrap_or(-1)
+                );
+            }
             Output::Close { code } => {
                 let _ = send.finish();
                 connection.close(VarInt::from_u32(code as u32), errors::name(code).as_bytes());

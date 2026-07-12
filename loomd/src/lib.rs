@@ -11,6 +11,7 @@
 //! - [`endpoint`]— quinn endpoint construction + the accept loop.
 //! - [`tls`]     — dev self-signed certs; peer verification skipped (TODO M7).
 
+pub mod clock;
 pub mod conn;
 pub mod endpoint;
 pub mod media;

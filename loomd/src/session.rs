@@ -74,12 +74,54 @@ pub enum Output {
     /// The client asked for a fresh IDR (§3.6). The driver forwards this to the
     /// running encoder, which codes the next frame as an IDR.
     RequestIdr,
+    /// Reply to a CLOCK_PING (§7): echo `t0`; the driver stamps host receive/send
+    /// times from the shared clock (the SM stays clock-free / sans-io).
+    ClockPong {
+        /// The client send timestamp to echo (CLOCK_PING key 0).
+        t0: i64,
+    },
+    /// A client STATS report (§3.7) for the host-side log (AIMD is M7.4).
+    Stats(StatsReport),
     /// Flush pending sends, then close the QUIC connection with `code`
     /// (`errors::NONE` for a clean BYE-driven close).
     Close {
         /// Application close code (PROTOCOL.md §10).
         code: u64,
     },
+}
+
+/// A parsed client STATS report (§3.7). `e2e_us` is absent until the client has
+/// its first clock sample.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StatsReport {
+    /// Video frames fully received.
+    pub frames_received: i64,
+    /// Video frames dropped (any fragment lost or stale).
+    pub frames_dropped: i64,
+    /// Datagrams received.
+    pub datagrams: i64,
+    /// Inter-arrival jitter estimate, ms.
+    pub jitter_ms: f64,
+    /// Mean decode time, µs.
+    pub decode_us: i64,
+    /// Current RTT estimate, µs.
+    pub rtt_us: i64,
+    /// Mean end-to-end video latency, µs (omitted before the first clock sample).
+    pub e2e_us: Option<i64>,
+}
+
+impl StatsReport {
+    fn from_body(body: &[(Value, Value)]) -> Self {
+        Self {
+            frames_received: int_key(body, 0).unwrap_or(0) as i64,
+            frames_dropped: int_key(body, 1).unwrap_or(0) as i64,
+            datagrams: int_key(body, 2).unwrap_or(0) as i64,
+            jitter_ms: float_key(body, 3).unwrap_or(0.0),
+            decode_us: int_key(body, 4).unwrap_or(0) as i64,
+            rtt_us: int_key(body, 5).unwrap_or(0) as i64,
+            e2e_us: int_key(body, 6).map(|v| v as i64),
+        }
+    }
 }
 
 /// Session phase.
@@ -139,27 +181,27 @@ impl HostSession {
             self.state = State::Closed;
             return vec![Output::Close { code: errors::NONE }];
         }
-        // CLOCK_PING is valid in any phase (§3.8). PONG is wired in M1.3; until
-        // then, tolerate it silently rather than mis-flag it as a violation.
+        // CLOCK_PING is valid in any phase (§3.8): echo t0 in a CLOCK_PONG.
         if msg_type == control::CLOCK_PING {
-            return Vec::new(); // TODO(M1.3): reply CLOCK_PONG.
+            let t0 = int_key(&body, 0).unwrap_or(0) as i64;
+            return vec![Output::ClockPong { t0 }];
         }
 
         match self.state {
             State::WaitHello => self.on_hello(msg_type, &body),
             State::WaitConfigAck => self.on_config_ack(msg_type, &body),
-            State::Streaming => self.on_streaming(msg_type),
+            State::Streaming => self.on_streaming(msg_type, &body),
             State::Closed => Vec::new(),
         }
     }
 
     /// Streaming-phase client→host messages (§3.3).
-    fn on_streaming(&mut self, msg_type: u64) -> Vec<Output> {
+    fn on_streaming(&mut self, msg_type: u64, body: &[(Value, Value)]) -> Vec<Output> {
         match msg_type {
             control::IDR_REQUEST => vec![Output::RequestIdr],
-            // STATS (M1.3) and INPUT (M4) are valid streaming messages we do not
-            // act on yet; ignore rather than mis-flag a violation.
-            control::STATS | control::INPUT => Vec::new(),
+            control::STATS => vec![Output::Stats(StatsReport::from_body(body))],
+            // INPUT is a valid streaming message we do not act on yet (M4).
+            control::INPUT => Vec::new(),
             _ => self.protocol_violation(),
         }
     }
@@ -260,6 +302,14 @@ impl HostSession {
 fn int_key(body: &[(Value, Value)], key: i128) -> Option<i128> {
     body.iter().find_map(|(k, v)| match (k, v) {
         (Value::Int(ki), Value::Int(vi)) if *ki == key => Some(*vi),
+        _ => None,
+    })
+}
+
+/// Look up a floating-point body value by key (STATS jitter, §3.7 key 3).
+fn float_key(body: &[(Value, Value)], key: i128) -> Option<f64> {
+    body.iter().find_map(|(k, v)| match (k, v) {
+        (Value::Int(ki), Value::Float(f)) if *ki == key => Some(*f),
         _ => None,
     })
 }
@@ -389,21 +439,32 @@ mod tests {
     }
 
     #[test]
-    fn stats_and_input_tolerated_while_streaming() {
+    fn stats_logged_input_tolerated_while_streaming() {
         let mut s = new_session();
         s.on_frame(hello(1, vec![1]));
         s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
-        assert!(s.on_frame(msg(control::STATS, vec![(0, Value::Int(1))])).is_empty());
+        let out = s.on_frame(msg(
+            control::STATS,
+            vec![(0, Value::Int(42)), (5, Value::Int(3000))],
+        ));
+        match out.as_slice() {
+            [Output::Stats(r)] => {
+                assert_eq!(r.frames_received, 42);
+                assert_eq!(r.rtt_us, 3000);
+                assert_eq!(r.e2e_us, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         assert!(s.on_frame(msg(control::INPUT, vec![(0, Value::Int(0))])).is_empty());
         assert_eq!(s.state(), State::Streaming);
     }
 
     #[test]
-    fn clock_ping_tolerated_during_setup() {
+    fn clock_ping_replies_pong_during_setup() {
         let mut s = new_session();
         s.on_frame(hello(1, vec![1]));
         let out = s.on_frame(msg(control::CLOCK_PING, vec![(0, Value::Int(123))]));
-        assert!(out.is_empty());
+        assert_eq!(out, vec![Output::ClockPong { t0: 123 }]);
         assert_eq!(s.state(), State::WaitConfigAck);
     }
 

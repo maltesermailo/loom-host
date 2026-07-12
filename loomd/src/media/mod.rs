@@ -71,12 +71,15 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
     let mut pattern = TestPattern::new(w, h);
     let mut drop_gen = DropInjector::new(drop_percent);
     let mut frame_seq: u32 = 0;
-    let epoch = Instant::now();
     let interval = Duration::from_secs_f64(1.0 / params.refresh.max(1) as f64);
     let mut next = Instant::now();
 
-    tracing::info!(target: "loom::media", event = "media_start", width = w, height = h,
-        refresh = params.refresh, drop_percent, "media thread started");
+    // Group this session's media events under one span (safe to enter: the media
+    // thread is synchronous, no await points).
+    let span = tracing::info_span!("media_session", width = w, height = h, refresh = params.refresh);
+    let _guard = span.enter();
+    tracing::info!(target: "loom::media", event = "media_start", drop_percent,
+        "media thread started");
 
     loop {
         if connection.close_reason().is_some() {
@@ -86,7 +89,7 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
         let force_idr = idr_rx.try_iter().count() > 0;
 
         pattern.render(frame_seq);
-        let capture_ts = epoch.elapsed().as_micros() as u64;
+        let capture_ts = crate::clock::host_now_us();
         match encoder.encode_i420(pattern.planes(), pattern.strides(), frame_seq as i64, force_idr) {
             Ok(Some(au)) => {
                 if force_idr {
