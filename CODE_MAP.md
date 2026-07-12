@@ -75,7 +75,8 @@ Tokio + quinn. `endpoint` builds it, `conn` moves bytes, `session` makes every p
 | File | What it is | Key symbols | § |
 |---|---|---|---|
 | [`lib.rs`](loomd/src/lib.rs) | Library root; module layering + `BoxErr` | — | — |
-| [`session.rs`](loomd/src/session.rs) | **Sans-io session state machine** (pure) | `HostSession::on_frame`, `Output`, `State`, `MediaParams` | 1.1, 3.4, 5 |
+| [`clock.rs`](loomd/src/clock.rs) | One monotonic host clock (capture_ts + CLOCK_PONG share it) | `host_now_us` | 1.2 |
+| [`session.rs`](loomd/src/session.rs) | **Sans-io session state machine** (pure) | `HostSession::on_frame`, `Output`, `State`, `MediaParams`, `StatsReport` | 1.1, 3.4, 5, 7 |
 | [`conn.rs`](loomd/src/conn.rs) | Per-connection async driver (transport I/O) | `handle`, `run_session`, `reject_busy`, `HostCfg` | 1.1, 3.1 |
 | [`media/mod.rs`](loomd/src/media/mod.rs) | Media thread: pattern→encode→fragment→datagram | `spawn`, `MediaHandle`, `DropInjector` | 4, 5 |
 | [`media/testpattern.rs`](loomd/src/media/testpattern.rs) | Synthetic source (gradient + counter + parity border) | `TestPattern::{render,planes}` | — |
@@ -96,9 +97,10 @@ Tokio + quinn. `endpoint` builds it, `conn` moves bytes, `session` makes every p
 | HELLO | no common codec | ERROR `NO_COMMON_CODEC` + close |
 | CONFIG_ACK | generation matches | send START + `StartMedia` → `Streaming` |
 | IDR_REQUEST | while `Streaming` | `RequestIdr` (driver forces an encoder IDR) |
-| STATS / INPUT | while `Streaming` | tolerated no-op (M1.3 / M4) |
+| STATS | while `Streaming` | `Stats(report)` (driver logs it; AIMD is M7.4) |
+| INPUT | while `Streaming` | tolerated no-op (M4) |
 | BYE | any state | clean close (`NONE`) |
-| CLOCK_PING | any state | tolerated no-op (PONG is TODO M1.3) |
+| CLOCK_PING | any state | `ClockPong{t0}` (driver stamps host times, §7) |
 | anything else | wrong for state | ERROR `PROTOCOL_VIOLATION` + close |
 
 ### Inside `conn.rs` — the I/O glue
@@ -107,7 +109,7 @@ Tokio + quinn. `endpoint` builds it, `conn` moves bytes, `session` makes every p
 |---|---|
 | [`handle`](loomd/src/conn.rs) | Accept connection; 1-permit semaphore gates the single session; surplus → `reject_busy` |
 | [`run_session`](loomd/src/conn.rs) | Accept control stream; loop `read_frame` → `decode_frame` → `on_frame` → `drive` |
-| [`drive`](loomd/src/conn.rs) | Apply `Output`s: `Send`→write, `StartMedia`→spawn media thread, `RequestIdr`→forward, `Close`→close |
+| [`drive`](loomd/src/conn.rs) | Apply `Output`s: `Send`→write, `StartMedia`→spawn, `RequestIdr`→forward, `ClockPong`→reply, `Stats`→log, `Close`→close |
 | [`reject_busy`](loomd/src/conn.rs) | ERROR `BUSY` on the control stream, then close with BUSY (§10) |
 | [`read_frame`](loomd/src/conn.rs) | Length-prefixed framing over `quinn::RecvStream` |
 
