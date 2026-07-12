@@ -42,9 +42,9 @@ impl Keymap {
                     )))
                 }
             };
-            let from: i64 = from
-                .parse()
-                .map_err(|_| Error::Keymap(format!("line {}: bad 'from' value {from:?}", idx + 1)))?;
+            let from: i64 = from.parse().map_err(|_| {
+                Error::Keymap(format!("line {}: bad 'from' value {from:?}", idx + 1))
+            })?;
             let to: i64 = to
                 .parse()
                 .map_err(|_| Error::Keymap(format!("line {}: bad 'to' value {to:?}", idx + 1)))?;

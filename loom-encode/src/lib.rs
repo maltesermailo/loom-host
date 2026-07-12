@@ -129,7 +129,11 @@ impl HevcEncoder {
                 ffi::x265_param_free(param);
                 return Err(EncodeError::Open);
             }
-            Ok(Self { param, enc, started: false })
+            Ok(Self {
+                param,
+                enc,
+                started: false,
+            })
         }
     }
 
@@ -254,7 +258,10 @@ mod tests {
 
         let mut saw_p = false;
         for pts in 1..6 {
-            if let Some(au) = enc.encode_i420([&y, &u, &v], strides, pts, false).expect("encode") {
+            if let Some(au) = enc
+                .encode_i420([&y, &u, &v], strides, pts, false)
+                .expect("encode")
+            {
                 if !au.keyframe {
                     saw_p = true;
                 }
@@ -268,7 +275,8 @@ mod tests {
         let mut enc = HevcEncoder::new(cfg()).expect("open");
         let (y, u, v) = gray(320, 240);
         let strides = [320, 160, 160];
-        enc.encode_i420([&y, &u, &v], strides, 0, false).expect("encode");
+        enc.encode_i420([&y, &u, &v], strides, 0, false)
+            .expect("encode");
         let forced = enc
             .encode_i420([&y, &u, &v], strides, 1, true)
             .expect("encode")

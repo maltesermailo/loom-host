@@ -49,7 +49,10 @@ impl MediaHandle {
 pub fn spawn(connection: Connection, params: MediaParams, drop_percent: u32) -> MediaHandle {
     let (idr_tx, idr_rx) = mpsc::channel();
     let join = std::thread::spawn(move || run(connection, params, drop_percent, idr_rx));
-    MediaHandle { idr_tx, join: Some(join) }
+    MediaHandle {
+        idr_tx,
+        join: Some(join),
+    }
 }
 
 fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: Receiver<()>) {
@@ -76,7 +79,12 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
 
     // Group this session's media events under one span (safe to enter: the media
     // thread is synchronous, no await points).
-    let span = tracing::info_span!("media_session", width = w, height = h, refresh = params.refresh);
+    let span = tracing::info_span!(
+        "media_session",
+        width = w,
+        height = h,
+        refresh = params.refresh
+    );
     let _guard = span.enter();
     tracing::info!(target: "loom::media", event = "media_start", drop_percent,
         "media thread started");
@@ -90,7 +98,12 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
 
         pattern.render(frame_seq);
         let capture_ts = crate::clock::host_now_us();
-        match encoder.encode_i420(pattern.planes(), pattern.strides(), frame_seq as i64, force_idr) {
+        match encoder.encode_i420(
+            pattern.planes(),
+            pattern.strides(),
+            frame_seq as i64,
+            force_idr,
+        ) {
             Ok(Some(au)) => {
                 if force_idr {
                     tracing::info!(target: "loom::media", event = "idr_forced", frame_seq);
@@ -143,7 +156,10 @@ struct DropInjector {
 
 impl DropInjector {
     fn new(percent: u32) -> Self {
-        Self { state: 0x9E37_79B9_7F4A_7C15, percent }
+        Self {
+            state: 0x9E37_79B9_7F4A_7C15,
+            percent,
+        }
     }
 
     fn should_drop(&mut self) -> bool {

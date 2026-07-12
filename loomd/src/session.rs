@@ -269,7 +269,10 @@ impl HostSession {
             (Value::Int(1), Value::Int(p.codec as i128)),
             (
                 Value::Int(2),
-                Value::Array(vec![Value::Int(p.width as i128), Value::Int(p.height as i128)]),
+                Value::Array(vec![
+                    Value::Int(p.width as i128),
+                    Value::Int(p.height as i128),
+                ]),
             ),
             (Value::Int(3), Value::Int(p.refresh as i128)),
             (Value::Int(4), Value::Int(p.audio as i128)),
@@ -317,9 +320,9 @@ fn float_key(body: &[(Value, Value)], key: i128) -> Option<f64> {
 /// Whether HELLO key 2 (codec list) contains `codec`.
 fn offers_codec(body: &[(Value, Value)], codec: u64) -> bool {
     body.iter().any(|(k, v)| match (k, v) {
-        (Value::Int(2), Value::Array(items)) => {
-            items.iter().any(|c| matches!(c, Value::Int(i) if *i == codec as i128))
-        }
+        (Value::Int(2), Value::Array(items)) => items
+            .iter()
+            .any(|c| matches!(c, Value::Int(i) if *i == codec as i128)),
         _ => false,
     })
 }
@@ -379,7 +382,9 @@ mod tests {
     fn wrong_version_hello_gets_version_unsupported() {
         let mut s = new_session();
         let out = s.on_frame(hello(2, vec![1]));
-        assert!(matches!(out.last(), Some(Output::Close { code }) if *code == errors::VERSION_UNSUPPORTED));
+        assert!(
+            matches!(out.last(), Some(Output::Close { code }) if *code == errors::VERSION_UNSUPPORTED)
+        );
         assert_error_code(&out, errors::VERSION_UNSUPPORTED);
         assert_eq!(s.state(), State::Closed);
     }
@@ -455,7 +460,9 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        assert!(s.on_frame(msg(control::INPUT, vec![(0, Value::Int(0))])).is_empty());
+        assert!(s
+            .on_frame(msg(control::INPUT, vec![(0, Value::Int(0))]))
+            .is_empty());
         assert_eq!(s.state(), State::Streaming);
     }
 

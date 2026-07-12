@@ -50,7 +50,11 @@ fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
         name: "rec-host".into(),
         // Small frames keep IDRs to a few fragments, so a forced recovery IDR is
         // rarely re-dropped at 1% — the mechanism, not luck, is what's measured.
-        params: MediaParams { width: 320, height: 240, ..MediaParams::default() },
+        params: MediaParams {
+            width: 320,
+            height: 240,
+            ..MediaParams::default()
+        },
         drop_percent,
     };
     let slot = Arc::new(Semaphore::new(1));
@@ -64,13 +68,19 @@ fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
 
 async fn connect(addr: std::net::SocketAddr) -> (Endpoint, Connection, SendStream, RecvStream) {
     let ep = endpoint::client().expect("client");
-    let c = ep.connect(addr, "localhost").unwrap().await.expect("handshake");
+    let c = ep
+        .connect(addr, "localhost")
+        .unwrap()
+        .await
+        .expect("handshake");
     let (s, r) = c.open_bi().await.expect("control stream");
     (ep, c, s, r)
 }
 
 async fn send_msg(send: &mut SendStream, ty: u64, body: &[(Value, Value)]) {
-    send.write_all(&control::encode_frame(ty, body)).await.unwrap();
+    send.write_all(&control::encode_frame(ty, body))
+        .await
+        .unwrap();
 }
 
 async fn read_msg(recv: &mut RecvStream) -> u64 {
@@ -101,7 +111,12 @@ async fn freeze_idr_request_recovery_under_200ms() {
     send_msg(&mut send, control::HELLO, &hello()).await;
     assert_eq!(read_msg(&mut recv).await, control::WELCOME);
     assert_eq!(read_msg(&mut recv).await, control::CONFIG);
-    send_msg(&mut send, control::CONFIG_ACK, &[(Value::Int(0), Value::Int(1))]).await;
+    send_msg(
+        &mut send,
+        control::CONFIG_ACK,
+        &[(Value::Int(0), Value::Int(1))],
+    )
+    .await;
     assert_eq!(read_msg(&mut recv).await, control::START);
 
     // Drive reassembly over received video datagrams.
@@ -116,7 +131,9 @@ async fn freeze_idr_request_recovery_under_200ms() {
             d = conn.read_datagram() => match d { Ok(d) => d, Err(_) => break },
             _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
         };
-        let Ok(dec) = datagram::decode(&dg) else { continue };
+        let Ok(dec) = datagram::decode(&dg) else {
+            continue;
+        };
         if dec.header.stream_id != 0 {
             continue;
         }
@@ -159,7 +176,10 @@ async fn freeze_idr_request_recovery_under_200ms() {
         }
     }
 
-    assert!(!cycles.is_empty(), "no freeze→recovery cycle observed under 1% loss");
+    assert!(
+        !cycles.is_empty(),
+        "no freeze→recovery cycle observed under 1% loss"
+    );
     let fastest = *cycles.iter().min().unwrap();
     assert!(
         fastest < Duration::from_millis(200),
@@ -179,7 +199,10 @@ fn hello() -> Vec<(Value, Value)> {
         (Value::Int(0), Value::Int(1)),
         (Value::Int(1), Value::Text("rec-client".into())),
         (Value::Int(2), Value::Array(vec![Value::Int(1)])),
-        (Value::Int(3), Value::Array(vec![Value::Int(2560), Value::Int(1440)])),
+        (
+            Value::Int(3),
+            Value::Array(vec![Value::Int(2560), Value::Int(1440)]),
+        ),
         (Value::Int(4), Value::Int(72)),
         (Value::Int(5), Value::Int(0)),
     ]

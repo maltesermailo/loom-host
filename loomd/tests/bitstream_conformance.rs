@@ -73,16 +73,24 @@ fn ffprobe_frames(stream: &[u8]) -> Vec<(String, bool)> {
 
     let out = Command::new("ffprobe")
         .args([
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "frame=pict_type,key_frame",
-            "-of", "csv=p=0",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pict_type,key_frame",
+            "-of",
+            "csv=p=0",
         ])
         .arg(&path)
         .output()
         .expect("run ffprobe (is ffmpeg installed?)");
     let _ = std::fs::remove_file(&path);
-    assert!(out.status.success(), "ffprobe failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "ffprobe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     String::from_utf8_lossy(&out.stdout)
         .lines()

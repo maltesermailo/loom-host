@@ -78,7 +78,11 @@ impl TestPattern {
 
     /// Luma/chroma strides (tightly packed I420).
     pub fn strides(&self) -> [i32; 3] {
-        [self.width as i32, (self.width / 2) as i32, (self.width / 2) as i32]
+        [
+            self.width as i32,
+            (self.width / 2) as i32,
+            (self.width / 2) as i32,
+        ]
     }
 
     fn draw_counter(&mut self, n: u32) {

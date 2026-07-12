@@ -296,7 +296,10 @@ mod tests {
         let v = Value::Map(vec![
             (Value::Int(0), Value::Int(1)),
             (Value::Int(1), Value::Text("hi".into())),
-            (Value::Int(2), Value::Array(vec![Value::Bool(true), Value::Null])),
+            (
+                Value::Int(2),
+                Value::Array(vec![Value::Bool(true), Value::Null]),
+            ),
             (Value::Int(3), Value::Bytes(vec![0xDE, 0xAD])),
         ]);
         let bytes = v.to_canonical();

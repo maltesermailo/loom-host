@@ -246,9 +246,21 @@ mod tests {
         assert_eq!(
             r.events(),
             &[
-                Event::Deliver { t_ms: 1, frame_seq: 0, keyframe: true },
-                Event::Deliver { t_ms: 14, frame_seq: 1, keyframe: false },
-                Event::Deliver { t_ms: 28, frame_seq: 2, keyframe: false },
+                Event::Deliver {
+                    t_ms: 1,
+                    frame_seq: 0,
+                    keyframe: true
+                },
+                Event::Deliver {
+                    t_ms: 14,
+                    frame_seq: 1,
+                    keyframe: false
+                },
+                Event::Deliver {
+                    t_ms: 28,
+                    frame_seq: 2,
+                    keyframe: false
+                },
             ]
         );
         assert_eq!(r.counters(), &Counters::default());

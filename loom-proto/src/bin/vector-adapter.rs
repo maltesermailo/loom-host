@@ -79,7 +79,8 @@ fn datagram_encode(input: &J) -> J {
     let frag_count = input["frag_count"].as_u64().unwrap() as u16;
     let payload = hex::decode(input["payload"].as_str().unwrap()).unwrap();
 
-    let header = datagram::DatagramHeader::new(keyframe, stream_id, frame_seq, frag_index, frag_count);
+    let header =
+        datagram::DatagramHeader::new(keyframe, stream_id, frame_seq, frag_index, frag_count);
     json!({ "hex": hex::encode(header.encode(&payload)) })
 }
 

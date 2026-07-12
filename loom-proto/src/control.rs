@@ -214,10 +214,13 @@ mod tests {
     #[test]
     fn decode_rejects_envelope_violations() {
         // body not a map: [5, [1,2]]
-        let not_map = Value::Array(vec![Value::Int(5), Value::Array(vec![Value::Int(1)])])
-            .to_canonical();
+        let not_map =
+            Value::Array(vec![Value::Int(5), Value::Array(vec![Value::Int(1)])]).to_canonical();
         let framed = frame_with(&not_map);
-        assert!(matches!(decode_frame(&framed), Err(Error::ProtocolViolation)));
+        assert!(matches!(
+            decode_frame(&framed),
+            Err(Error::ProtocolViolation)
+        ));
 
         // wrong arity: [1, {}, 3]
         let arity =

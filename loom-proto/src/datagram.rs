@@ -41,7 +41,13 @@ pub struct DatagramHeader {
 impl DatagramHeader {
     /// Construct a header for a fragment, deriving `last_fragment` from the
     /// fragment position as §4 requires (`LAST_FRAGMENT` set iff last fragment).
-    pub fn new(keyframe: bool, stream_id: u16, frame_seq: u32, frag_index: u16, frag_count: u16) -> Self {
+    pub fn new(
+        keyframe: bool,
+        stream_id: u16,
+        frame_seq: u32,
+        frag_index: u16,
+        frag_count: u16,
+    ) -> Self {
         let last_fragment = frag_count > 0 && frag_index == frag_count - 1;
         Self {
             keyframe,
@@ -252,18 +258,25 @@ mod tests {
             let off = i * MAX_PAYLOAD;
             let payload = &dg[HEADER_LEN..];
             reassembled[off..off + payload.len()].copy_from_slice(payload);
-            r.push(0, Fragment {
-                frame_seq: d.header.frame_seq,
-                frag_index: d.header.frag_index,
-                frag_count: d.header.frag_count,
-                keyframe: d.header.keyframe,
-            });
+            r.push(
+                0,
+                Fragment {
+                    frame_seq: d.header.frame_seq,
+                    frag_index: d.header.frag_index,
+                    frag_count: d.header.frag_count,
+                    keyframe: d.header.keyframe,
+                },
+            );
         }
         assert_eq!(reassembled, body);
         // The metadata state machine delivers exactly the one keyframe.
         assert!(matches!(
             r.events(),
-            [Event::Deliver { frame_seq: 9, keyframe: true, .. }]
+            [Event::Deliver {
+                frame_seq: 9,
+                keyframe: true,
+                ..
+            }]
         ));
     }
 

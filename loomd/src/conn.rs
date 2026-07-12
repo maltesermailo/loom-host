@@ -98,10 +98,17 @@ async fn session_loop(
                 }
                 Err(_) => {
                     // Malformed framing/CBOR the SM never sees (§6.6).
-                    send_frame(&mut send, control::ERROR, &error_body(errors::PROTOCOL_VIOLATION))
-                        .await?;
+                    send_frame(
+                        &mut send,
+                        control::ERROR,
+                        &error_body(errors::PROTOCOL_VIOLATION),
+                    )
+                    .await?;
                     let _ = send.finish();
-                    connection.close(VarInt::from_u32(errors::PROTOCOL_VIOLATION as u32), b"bad frame");
+                    connection.close(
+                        VarInt::from_u32(errors::PROTOCOL_VIOLATION as u32),
+                        b"bad frame",
+                    );
                     return Ok(());
                 }
             },
@@ -132,7 +139,11 @@ async fn drive(
             }
             Output::StartMedia => {
                 // Spawn the synthetic media pipeline on its own thread (§5 / M1.2).
-                *media = Some(media::spawn(connection.clone(), cfg.params, cfg.drop_percent));
+                *media = Some(media::spawn(
+                    connection.clone(),
+                    cfg.params,
+                    cfg.drop_percent,
+                ));
             }
             Output::RequestIdr => {
                 if let Some(m) = media.as_ref() {

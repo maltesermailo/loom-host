@@ -36,9 +36,8 @@ impl DevIdentity {
     pub fn generate() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
         let chain = vec![certified.cert.der().clone()];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            certified.key_pair.serialize_der(),
-        ));
+        let key =
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der()));
         Ok(Self { chain, key })
     }
 }

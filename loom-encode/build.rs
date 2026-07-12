@@ -27,7 +27,9 @@ fn main() {
         builder = builder.clang_arg(format!("-I{}", path.display()));
     }
 
-    let bindings = builder.generate().expect("bindgen: failed to generate x265 bindings");
+    let bindings = builder
+        .generate()
+        .expect("bindgen: failed to generate x265 bindings");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out.join("x265_bindings.rs"))

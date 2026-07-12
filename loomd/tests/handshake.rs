@@ -87,7 +87,10 @@ fn hello_body(version: i128, codecs: Vec<i128>) -> Vec<(Value, Value)> {
             Value::Int(2),
             Value::Array(codecs.into_iter().map(Value::Int).collect()),
         ),
-        (Value::Int(3), Value::Array(vec![Value::Int(2560), Value::Int(1440)])),
+        (
+            Value::Int(3),
+            Value::Array(vec![Value::Int(2560), Value::Int(1440)]),
+        ),
         (Value::Int(4), Value::Int(72)),
         (Value::Int(5), Value::Int(0)),
     ]
@@ -137,7 +140,12 @@ async fn full_handshake_completes() {
     assert_eq!(int_key(&config, 0), Some(1)); // generation 1
     assert_eq!(int_key(&config, 1), Some(1)); // HEVC
 
-    send_msg(&mut send, control::CONFIG_ACK, &[(Value::Int(0), Value::Int(1))]).await;
+    send_msg(
+        &mut send,
+        control::CONFIG_ACK,
+        &[(Value::Int(0), Value::Int(1))],
+    )
+    .await;
 
     let start = read_msg(&mut recv).await;
     assert_eq!(msg_type_of(&start), control::START);
