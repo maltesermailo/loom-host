@@ -82,16 +82,31 @@ Screen & System Audio Recording*. macOS attributes the permission to the **launc
 application**, so running `loomd` from a shell means the *terminal* is what must be listed
 (and restarted after granting), not the `loomd` binary.
 
-## `loom-encode` — software HEVC encode (M1.2)
+## `loom-encode` — HEVC encode (x265 M1.2 · NVENC M1.5 · VideoToolbox M2.2)
 
-Safe wrapper over the libx265 C API. Pure *mechanism*: the §5 knobs are passed in, so policy
-stays in `loomd`. Needs Homebrew libx265 (pkg-config); FFI is generated at build time.
+Three backends, one seam: an `EncoderConfig` in, an Annex-B `AccessUnit` out, so `loomd`
+swaps between them with no other change. Pure *mechanism* — the §5 knobs are passed in, so
+policy stays in `loomd`'s constraints module. x265 needs Homebrew libx265 (pkg-config; FFI
+generated at build time); NVENC is `--features nvenc` (Linux); VideoToolbox is target-gated
+(macOS system framework).
 
 | File | What it is | Key symbols | § |
 |---|---|---|---|
-| [`src/lib.rs`](loom-encode/src/lib.rs) | Safe HEVC encoder | `HevcEncoder::{new,encode_i420}`, `EncoderConfig`, `AccessUnit` | 5, 4.1 |
+| [`src/lib.rs`](loom-encode/src/lib.rs) | Crate root; libx265 encoder + error type | `HevcEncoder::{new,encode_i420}`, `EncoderConfig`, `AccessUnit` | 5, 4.1 |
 | [`src/ffi.rs`](loom-encode/src/ffi.rs) | bindgen libx265 FFI (lints off) | `include!(x265_bindings.rs)` | — |
 | [`build.rs`](loom-encode/build.rs) · [`src/x265_shim.c`](loom-encode/src/x265_shim.c) | pkg-config + bindgen + shim for the version-macro'd open | `loom_x265_encoder_open` | — |
+| [`src/nvenc.rs`](loom-encode/src/nvenc.rs) · [`src/av_ffi.rs`](loom-encode/src/av_ffi.rs) | `hevc_nvenc` via libavcodec ‹feature `nvenc`› | `NvencEncoder` | 5 |
+| [`src/videotoolbox.rs`](loom-encode/src/videotoolbox.rs) | VideoToolbox low-latency session ‹macOS› | `VideoToolboxEncoder` | 5 |
+| [`src/annexb.rs`](loom-encode/src/annexb.rs) | AVCC length-prefix → Annex-B walk ‹macOS› | `annexb::append` | 4.1, 5.2 |
+
+**Why VideoToolbox needs `annexb`.** VideoToolbox emits length-prefixed NALs and keeps
+VPS/SPS/PPS *out of band* in the format description; §4.1/§5.2 want Annex-B with the
+parameter sets in every IDR. `videotoolbox.rs` does both conversions per frame.
+
+**§5.4 rests on a test, not an API.** VideoToolbox has no scene-cut control and documents
+`MaxKeyFrameInterval` as a ceiling it may beat for compression efficiency. `loomd`'s
+`videotoolbox_hard_scene_cuts_produce_no_unrequested_idrs` is what actually holds §5.4 down;
+if it ever fails, the bitstream is non-conformant and it is a spec conversation.
 
 ## `loomd` — the host daemon (lib + bin)
 

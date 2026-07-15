@@ -40,7 +40,8 @@ struct Args {
     source: CaptureSource,
 
     /// HEVC encoder. `x265` is software (default, all platforms); `nvenc` is
-    /// hardware and only exists in a build compiled with `--features nvenc`.
+    /// hardware and only exists in a build compiled with `--features nvenc`;
+    /// `videotoolbox` is hardware and exists only in a macOS build.
     #[arg(long, value_enum, default_value_t = EncoderKind::X265)]
     encoder: EncoderKind,
 

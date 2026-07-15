@@ -13,6 +13,7 @@
 
 use std::io::Write;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use loom_encode::HevcEncoder;
 use loomd::media::{constraints, testpattern::TestPattern};
@@ -65,8 +66,17 @@ fn nal_types(stream: &[u8]) -> Vec<u8> {
 
 /// `(pict_type, key_frame)` per frame via ffprobe (the libavcodec reference).
 fn ffprobe_frames(stream: &[u8]) -> Vec<(String, bool)> {
+    // Cargo runs the tests in this file as parallel threads of one process, so the
+    // pid alone is not a unique name — concurrent callers would clobber and delete
+    // each other's bitstream.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+
     let mut path = std::env::temp_dir();
-    path.push(format!("loom_conf_{}.hevc", std::process::id()));
+    path.push(format!(
+        "loom_conf_{}_{}.hevc",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::File::create(&path)
         .and_then(|mut f| f.write_all(stream))
         .expect("write temp bitstream");
@@ -219,4 +229,125 @@ fn nvenc_every_idr_carries_parameter_sets() {
     assert_eq!(count(32), idrs, "a VPS per IDR");
     assert_eq!(count(33), idrs, "an SPS per IDR");
     assert_eq!(count(34), idrs, "a PPS per IDR");
+}
+
+// The same §5 checks against the VideoToolbox backend (M2.2). Target-gated rather
+// than feature-gated: VideoToolbox is a system framework, so these run as part of
+// the default check.sh on macOS.
+#[cfg(target_os = "macos")]
+fn encode_stream_videotoolbox(
+    frames: &[(Vec<u8>, Vec<u8>, Vec<u8>)],
+    force_idr_at: u32,
+) -> Vec<u8> {
+    let cfg = constraints::encoder_config(W as u32, H as u32, 72, 2000);
+    let mut enc = loom_encode::VideoToolboxEncoder::new(cfg).expect("open VideoToolbox");
+    let strides = [W as i32, (W / 2) as i32, (W / 2) as i32];
+    let mut out = Vec::new();
+
+    for (n, (y, u, v)) in frames.iter().enumerate() {
+        let force = n as u32 == force_idr_at;
+        if let Some(au) = enc
+            .encode_i420([y, u, v], strides, n as i64, force)
+            .expect("encode")
+        {
+            out.extend_from_slice(&au.data);
+        }
+    }
+
+    out
+}
+
+/// The synthetic test pattern as raw I420 frames, so both encoders see the same
+/// input the x265 path is judged on.
+#[cfg(target_os = "macos")]
+fn pattern_frames(count: u32) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let mut pat = TestPattern::new(W, H);
+
+    (0..count)
+        .map(|n| {
+            pat.render(n);
+            let [y, u, v] = pat.planes();
+            (y.to_vec(), u.to_vec(), v.to_vec())
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn videotoolbox_no_b_frames_and_idr_only_at_start_and_on_request() {
+    let stream = encode_stream_videotoolbox(&pattern_frames(FRAMES), FORCE_IDR_AT);
+    let frames = ffprobe_frames(&stream);
+    assert!(!frames.is_empty(), "decoder saw no frames");
+
+    assert!(
+        frames.iter().all(|(t, _)| t != "B"),
+        "found a B-frame: {frames:?}"
+    );
+
+    let keyframe_indices: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, key))| *key)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        keyframe_indices,
+        vec![0, FORCE_IDR_AT as usize],
+        "IDRs must appear only at start and on request; got {keyframe_indices:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn videotoolbox_every_idr_carries_parameter_sets() {
+    let types = nal_types(&encode_stream_videotoolbox(
+        &pattern_frames(FRAMES),
+        FORCE_IDR_AT,
+    ));
+    let count = |t: u8| types.iter().filter(|&&x| x == t).count();
+    let idrs = count(19) + count(20);
+    assert_eq!(idrs, 2, "expected exactly 2 IDR NALs (start + forced)");
+    // VideoToolbox keeps parameter sets out of band, so this asserts loom-encode's
+    // injection actually happened (§5.2).
+    assert_eq!(count(32), idrs, "a VPS per IDR");
+    assert_eq!(count(33), idrs, "an SPS per IDR");
+    assert_eq!(count(34), idrs, "a PPS per IDR");
+}
+
+/// §5.4's empirical backstop. VideoToolbox has **no scene-cut control** — unlike
+/// x265's `scenecutThreshold=0` — and documents MaxKeyFrameInterval as a ceiling
+/// the encoder may beat "if this would result in more efficient compression". A
+/// full-frame flip every frame is the strongest inducement to insert one; §5.4
+/// says none may appear. If this ever fails, the bitstream is non-conformant and
+/// the fix is a spec conversation, not a looser assertion.
+#[cfg(target_os = "macos")]
+#[test]
+fn videotoolbox_hard_scene_cuts_produce_no_unrequested_idrs() {
+    let flat = |luma: u8| {
+        (
+            vec![luma; W * H],
+            vec![128u8; (W / 2) * (H / 2)],
+            vec![128u8; (W / 2) * (H / 2)],
+        )
+    };
+    // Alternating black/white full frames: every frame is a total scene change.
+    let frames: Vec<_> = (0..FRAMES)
+        .map(|n| if n % 2 == 0 { flat(16) } else { flat(235) })
+        .collect();
+
+    let stream = encode_stream_videotoolbox(&frames, u32::MAX); // never force one
+    let decoded = ffprobe_frames(&stream);
+    assert!(!decoded.is_empty(), "decoder saw no frames");
+
+    let keyframe_indices: Vec<usize> = decoded
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, key))| *key)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        keyframe_indices,
+        vec![0],
+        "§5.4: only the start IDR may appear, even across hard scene cuts; got {keyframe_indices:?}"
+    );
 }

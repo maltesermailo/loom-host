@@ -24,6 +24,8 @@ use loom_capture::{I420Buffer, PortalCapture};
 use loom_capture::{I420Buffer, ScreenCapture};
 #[cfg(feature = "nvenc")]
 use loom_encode::NvencEncoder;
+#[cfg(target_os = "macos")]
+use loom_encode::VideoToolboxEncoder;
 use loom_encode::{AccessUnit, EncodeError, EncoderConfig, HevcEncoder};
 use loom_proto::datagram;
 
@@ -76,6 +78,10 @@ pub enum EncoderKind {
     /// Hardware HEVC via NVENC (M1.5) — Linux/NVIDIA only.
     #[cfg(feature = "nvenc")]
     Nvenc,
+    /// Hardware HEVC via VideoToolbox (M2.2) — macOS only.
+    #[cfg(target_os = "macos")]
+    #[value(name = "videotoolbox")]
+    VideoToolbox,
 }
 
 /// The live encoder, resolved once when the media thread starts. Both arms take
@@ -84,6 +90,8 @@ enum VideoEncoder {
     X265(HevcEncoder),
     #[cfg(feature = "nvenc")]
     Nvenc(NvencEncoder),
+    #[cfg(target_os = "macos")]
+    VideoToolbox(VideoToolboxEncoder),
 }
 
 impl VideoEncoder {
@@ -98,6 +106,8 @@ impl VideoEncoder {
             VideoEncoder::X265(e) => e.encode_i420(planes, strides, pts, force_idr),
             #[cfg(feature = "nvenc")]
             VideoEncoder::Nvenc(e) => e.encode_i420(planes, strides, pts, force_idr),
+            #[cfg(target_os = "macos")]
+            VideoEncoder::VideoToolbox(e) => e.encode_i420(planes, strides, pts, force_idr),
         }
     }
 }
@@ -107,6 +117,8 @@ fn open_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Result<VideoEncoder, E
         EncoderKind::X265 => Ok(VideoEncoder::X265(HevcEncoder::new(cfg)?)),
         #[cfg(feature = "nvenc")]
         EncoderKind::Nvenc => Ok(VideoEncoder::Nvenc(NvencEncoder::new(cfg)?)),
+        #[cfg(target_os = "macos")]
+        EncoderKind::VideoToolbox => Ok(VideoEncoder::VideoToolbox(VideoToolboxEncoder::new(cfg)?)),
     }
 }
 
