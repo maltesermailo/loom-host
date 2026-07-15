@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 
 use loomd::conn::HostCfg;
-use loomd::media::CaptureSource;
+use loomd::media::{CaptureSource, EncoderKind};
 use loomd::session::MediaParams;
 use loomd::{endpoint, BoxErr};
 
@@ -37,6 +37,11 @@ struct Args {
     /// `--width/--height` to match the monitor's native resolution.
     #[arg(long, value_enum, default_value_t = CaptureSource::Synthetic)]
     source: CaptureSource,
+
+    /// HEVC encoder. `x265` is software (default, all platforms); `nvenc` is
+    /// hardware and only exists in a build compiled with `--features nvenc`.
+    #[arg(long, value_enum, default_value_t = EncoderKind::X265)]
+    encoder: EncoderKind,
 
     /// Skip peer certificate verification. REQUIRED to accept any connection
     /// until certificate pinning lands in M7 — there is currently no way to
@@ -92,6 +97,7 @@ async fn main() -> Result<(), BoxErr> {
         name: args.name,
         params,
         source: args.source,
+        encoder: args.encoder,
         drop_percent: args.drop_percent,
     };
     endpoint::accept_loop(endpoint, cfg).await;

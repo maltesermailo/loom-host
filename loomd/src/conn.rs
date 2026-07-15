@@ -31,6 +31,8 @@ pub struct HostCfg {
     pub params: MediaParams,
     /// Frame source the media thread encodes (`--source`).
     pub source: media::CaptureSource,
+    /// HEVC encoder backend (`--encoder`).
+    pub encoder: media::EncoderKind,
     /// Dev datagram-loss injection percentage (`--drop-percent`; 0 = none).
     pub drop_percent: u32,
 }
@@ -146,6 +148,7 @@ async fn drive(
                     connection.clone(),
                     cfg.params,
                     cfg.source,
+                    cfg.encoder,
                     cfg.drop_percent,
                 ));
             }

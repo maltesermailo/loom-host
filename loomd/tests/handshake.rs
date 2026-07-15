@@ -40,6 +40,7 @@ fn spawn_host() -> SocketAddr {
             ..MediaParams::default()
         },
         source: loomd::media::CaptureSource::Synthetic,
+        encoder: loomd::media::EncoderKind::X265,
         drop_percent: 0,
     };
     // Mirror endpoint::accept_loop but keep the handle-per-conn behaviour under

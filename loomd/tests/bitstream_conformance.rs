@@ -162,3 +162,61 @@ fn every_idr_carries_parameter_sets() {
     assert_eq!(count(33), idrs, "an SPS per IDR");
     assert_eq!(count(34), idrs, "a PPS per IDR");
 }
+
+// The same §5 checks against the NVENC backend (M1.5). Gated on `nvenc`, which
+// links libavcodec + NVENC and needs the GPU — run `cargo test -p loomd
+// --features nvenc` on the Linux host; the default check.sh run skips these.
+#[cfg(feature = "nvenc")]
+fn encode_stream_nvenc() -> Vec<u8> {
+    let cfg = constraints::encoder_config(W as u32, H as u32, 72, 2000);
+    let mut enc = loom_encode::NvencEncoder::new(cfg).expect("open hevc_nvenc");
+    let mut pat = TestPattern::new(W, H);
+    let mut out = Vec::new();
+    for n in 0..FRAMES {
+        pat.render(n);
+        let force = n == FORCE_IDR_AT;
+        if let Some(au) = enc
+            .encode_i420(pat.planes(), pat.strides(), n as i64, force)
+            .expect("encode")
+        {
+            out.extend_from_slice(&au.data);
+        }
+    }
+    out
+}
+
+#[cfg(feature = "nvenc")]
+#[test]
+fn nvenc_no_b_frames_and_idr_only_at_start_and_on_request() {
+    let frames = ffprobe_frames(&encode_stream_nvenc());
+    assert!(!frames.is_empty(), "decoder saw no frames");
+
+    assert!(
+        frames.iter().all(|(t, _)| t != "B"),
+        "found a B-frame: {frames:?}"
+    );
+
+    let keyframe_indices: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, key))| *key)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        keyframe_indices,
+        vec![0, FORCE_IDR_AT as usize],
+        "IDRs must appear only at start and on request; got {keyframe_indices:?}"
+    );
+}
+
+#[cfg(feature = "nvenc")]
+#[test]
+fn nvenc_every_idr_carries_parameter_sets() {
+    let types = nal_types(&encode_stream_nvenc());
+    let count = |t: u8| types.iter().filter(|&&x| x == t).count();
+    let idrs = count(19) + count(20);
+    assert_eq!(idrs, 2, "expected exactly 2 IDR NALs (start + forced)");
+    assert_eq!(count(32), idrs, "a VPS per IDR");
+    assert_eq!(count(33), idrs, "an SPS per IDR");
+    assert_eq!(count(34), idrs, "a PPS per IDR");
+}

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Enable the NVENC encoder backend (Linux/NVIDIA); forwards to loom-encode.
+nvenc = ["loom-encode/nvenc"]
+
 [dependencies]
 loom-proto = { path = "../loom-proto" }
 loom-capture = { path = "../loom-capture" }

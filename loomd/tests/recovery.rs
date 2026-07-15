@@ -56,6 +56,7 @@ fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
             ..MediaParams::default()
         },
         source: loomd::media::CaptureSource::Synthetic,
+        encoder: loomd::media::EncoderKind::X265,
         drop_percent,
     };
     let slot = Arc::new(Semaphore::new(1));

@@ -19,7 +19,9 @@ use bytes::Bytes;
 use quinn::Connection;
 
 use loom_capture::{I420Buffer, PortalCapture};
-use loom_encode::HevcEncoder;
+#[cfg(feature = "nvenc")]
+use loom_encode::NvencEncoder;
+use loom_encode::{AccessUnit, EncodeError, EncoderConfig, HevcEncoder};
 use loom_proto::datagram;
 
 use crate::session::MediaParams;
@@ -49,6 +51,50 @@ enum Source {
     },
 }
 
+/// Which HEVC encoder loomd uses (`--encoder`). Not a protocol concern — the §5
+/// output is identical either way. `Nvenc` exists only in a build with the
+/// `nvenc` feature, so the CLI offers it exactly when it can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EncoderKind {
+    /// Software HEVC via libx265 (M1.2) — all platforms, the default.
+    X265,
+    /// Hardware HEVC via NVENC (M1.5) — Linux/NVIDIA only.
+    #[cfg(feature = "nvenc")]
+    Nvenc,
+}
+
+/// The live encoder, resolved once when the media thread starts. Both arms take
+/// the same I420 planes/strides and yield the same [`AccessUnit`].
+enum VideoEncoder {
+    X265(HevcEncoder),
+    #[cfg(feature = "nvenc")]
+    Nvenc(NvencEncoder),
+}
+
+impl VideoEncoder {
+    fn encode_i420(
+        &mut self,
+        planes: [&[u8]; 3],
+        strides: [i32; 3],
+        pts: i64,
+        force_idr: bool,
+    ) -> Result<Option<AccessUnit>, EncodeError> {
+        match self {
+            VideoEncoder::X265(e) => e.encode_i420(planes, strides, pts, force_idr),
+            #[cfg(feature = "nvenc")]
+            VideoEncoder::Nvenc(e) => e.encode_i420(planes, strides, pts, force_idr),
+        }
+    }
+}
+
+fn open_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Result<VideoEncoder, EncodeError> {
+    match kind {
+        EncoderKind::X265 => Ok(VideoEncoder::X265(HevcEncoder::new(cfg)?)),
+        #[cfg(feature = "nvenc")]
+        EncoderKind::Nvenc => Ok(VideoEncoder::Nvenc(NvencEncoder::new(cfg)?)),
+    }
+}
+
 /// Handle to a running media thread. Dropping it detaches; [`Self::join`] waits.
 pub struct MediaHandle {
     idr_tx: Sender<()>,
@@ -75,10 +121,12 @@ pub fn spawn(
     connection: Connection,
     params: MediaParams,
     source: CaptureSource,
+    encoder: EncoderKind,
     drop_percent: u32,
 ) -> MediaHandle {
     let (idr_tx, idr_rx) = mpsc::channel();
-    let join = std::thread::spawn(move || run(connection, params, source, drop_percent, idr_rx));
+    let join =
+        std::thread::spawn(move || run(connection, params, source, encoder, drop_percent, idr_rx));
     MediaHandle {
         idr_tx,
         join: Some(join),
@@ -89,6 +137,7 @@ fn run(
     connection: Connection,
     params: MediaParams,
     source_kind: CaptureSource,
+    encoder_kind: EncoderKind,
     drop_percent: u32,
     idr_rx: Receiver<()>,
 ) {
@@ -99,7 +148,7 @@ fn run(
         params.refresh as u32,
         params.bitrate_kbps as u32,
     );
-    let mut encoder = match HevcEncoder::new(cfg) {
+    let mut encoder = match open_encoder(encoder_kind, cfg) {
         Ok(e) => e,
         Err(e) => {
             tracing::error!(target: "loom::media", error = %e, "encoder open failed");
