@@ -130,4 +130,35 @@ mod tests {
         assert_eq!(y[0], 16, "row 0 black");
         assert_eq!(y[2], 235, "row 1 white");
     }
+
+    // Measurement, not a per-commit guard: the < 10 ms budget only holds for a
+    // release build (loomd always runs release), and debug check.sh would fail it.
+    // Run with: cargo test -p loom-capture --release -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing measurement; meaningful only in release"]
+    fn capture_to_encode_handoff_under_budget() {
+        // ROADMAP M1.4: the SHM path's capture→encode overhead must stay < 10 ms
+        // at the streamed resolution. That overhead is the BGRx→I420 conversion
+        // plus the slot→encoder-buffer copy; both are content-independent, so a
+        // filled buffer at 1440p (the worst case we stream) is representative.
+        let (w, h) = (2560u32, 1440u32);
+        let src = vec![0x80u8; w as usize * h as usize * 4];
+        let mut dst = I420Buffer::new(w, h);
+        let mut encoder_input = I420Buffer::new(w, h);
+
+        let iters = 50;
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            to_i420(&src, w as usize * 4, PixelFormat::BGRX, &mut dst);
+            dst.copy_into(&mut encoder_input);
+        }
+        std::hint::black_box(encoder_input.planes()[0][0]);
+        let mean_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        println!("capture→encode handoff (convert + fill) @1440p: {mean_ms:.2} ms mean");
+        assert!(
+            mean_ms < 10.0,
+            "handoff {mean_ms:.2} ms exceeds the 10 ms budget"
+        );
+    }
 }
