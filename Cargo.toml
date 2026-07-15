@@ -32,3 +32,7 @@ clap = { version = "4", features = ["derive"] }
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# --- loom-capture (Linux portal ScreenCast → PipeWire, M1.4) ---
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+pipewire = { version = "0.8", features = ["v0_3_77"] }
