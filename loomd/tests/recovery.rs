@@ -43,7 +43,7 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
     }
 }
 
-fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
+fn spawn_host(drop_percent: u32, encoder: loomd::media::EncoderKind) -> std::net::SocketAddr {
     let server = endpoint::server(([127, 0, 0, 1], 0).into()).expect("server");
     let bound = server.local_addr().unwrap();
     let cfg = HostCfg {
@@ -56,7 +56,7 @@ fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
             ..MediaParams::default()
         },
         source: loomd::media::CaptureSource::Synthetic,
-        encoder: loomd::media::EncoderKind::X265,
+        encoder,
         drop_percent,
     };
     let slot = Arc::new(Semaphore::new(1));
@@ -106,7 +106,7 @@ async fn freeze_idr_request_recovery_under_200ms() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
 
-    let addr = spawn_host(1);
+    let addr = spawn_host(1, loomd::media::EncoderKind::X265);
     let (_ep, conn, mut send, mut recv) = connect(addr).await;
 
     // Handshake to STREAMING.
@@ -208,4 +208,87 @@ fn hello() -> Vec<(Value, Value)> {
         (Value::Int(4), Value::Int(72)),
         (Value::Int(5), Value::Int(0)),
     ]
+}
+
+// Step 4: IDR recovery must stay < 200 ms through the *real NVENC* encoder.
+// Portal capture can't be driven headlessly (GUI approval), so this uses the
+// synthetic source — recovery is encoder-driven (forced IDR on request) and
+// independent of the capture source. Gated on `nvenc` (links NVENC + needs the
+// GPU); run with `cargo test -p loomd --features nvenc`.
+#[cfg(feature = "nvenc")]
+#[tokio::test]
+async fn nvenc_freeze_idr_request_recovery_under_200ms() {
+    let addr = spawn_host(1, loomd::media::EncoderKind::Nvenc);
+    let (_ep, conn, mut send, mut recv) = connect(addr).await;
+
+    send_msg(&mut send, control::HELLO, &hello()).await;
+    assert_eq!(read_msg(&mut recv).await, control::WELCOME);
+    assert_eq!(read_msg(&mut recv).await, control::CONFIG);
+    send_msg(
+        &mut send,
+        control::CONFIG_ACK,
+        &[(Value::Int(0), Value::Int(1))],
+    )
+    .await;
+    assert_eq!(read_msg(&mut recv).await, control::START);
+
+    let mut reasm = Reassembler::new();
+    let clock = Instant::now();
+    let mut freeze_at: Option<Instant> = None;
+    let mut recovery: Option<Duration> = None;
+    let deadline = Instant::now() + Duration::from_secs(8);
+
+    while Instant::now() < deadline && recovery.is_none() {
+        let dg = tokio::select! {
+            d = conn.read_datagram() => match d { Ok(d) => d, Err(_) => break },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+        };
+        let Ok(dec) = datagram::decode(&dg) else {
+            continue;
+        };
+        if dec.header.stream_id != 0 {
+            continue;
+        }
+        let before = reasm.events().len();
+        reasm.push(
+            clock.elapsed().as_millis() as i64,
+            Fragment {
+                frame_seq: dec.header.frame_seq,
+                frag_index: dec.header.frag_index,
+                frag_count: dec.header.frag_count,
+                keyframe: dec.header.keyframe,
+            },
+        );
+        let mut idr_last_good: Option<u32> = None;
+        let mut delivered_keyframe = false;
+        for ev in &reasm.events()[before..] {
+            match ev {
+                Event::IdrRequest { last_good, .. } => idr_last_good = Some(*last_good),
+                Event::Deliver { keyframe: true, .. } => delivered_keyframe = true,
+                _ => {}
+            }
+        }
+        if let Some(last_good) = idr_last_good {
+            if freeze_at.is_none() {
+                freeze_at = Some(Instant::now());
+            }
+            send_msg(
+                &mut send,
+                control::IDR_REQUEST,
+                &[(Value::Int(0), Value::Int(last_good as i128))],
+            )
+            .await;
+        }
+        if delivered_keyframe {
+            if let Some(f) = freeze_at.take() {
+                recovery = Some(f.elapsed());
+            }
+        }
+    }
+
+    let recovery = recovery.expect("no freeze→recovery cycle observed under 1% loss (nvenc)");
+    assert!(
+        recovery < Duration::from_millis(200),
+        "nvenc recovery {recovery:?} exceeds the 200 ms budget"
+    );
 }
