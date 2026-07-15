@@ -9,6 +9,13 @@
 
 mod ffi;
 
+#[cfg(feature = "nvenc")]
+mod av_ffi;
+#[cfg(feature = "nvenc")]
+mod nvenc;
+#[cfg(feature = "nvenc")]
+pub use nvenc::NvencEncoder;
+
 use std::ffi::{c_void, CString};
 
 /// libx265 NAL type for IDR access units (§5.2), from `x265.h`.
@@ -35,6 +42,14 @@ pub enum EncodeError {
     /// `x265_encoder_encode` returned a negative status.
     #[error("x265_encoder_encode returned {0}")]
     Encode(i32),
+    /// `hevc_nvenc` is not registered in this libavcodec build (or no NVENC GPU).
+    #[cfg(feature = "nvenc")]
+    #[error("hevc_nvenc encoder not available")]
+    EncoderUnavailable,
+    /// A libavcodec/NVENC call failed with the given `AVERROR`.
+    #[cfg(feature = "nvenc")]
+    #[error("libavcodec error {0}")]
+    Av(i32),
 }
 
 /// Encoder configuration. The §5 knobs are explicit so the *policy* lives in the

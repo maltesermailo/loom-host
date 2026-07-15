@@ -9,8 +9,15 @@ fn main() {
         .probe("x265")
         .expect("libx265 not found via pkg-config (try `brew install x265`)");
 
-    // libx265 is C++ under its C API; make sure the C++ runtime is linked.
-    println!("cargo:rustc-link-lib=c++");
+    // libx265 is C++ under its C API; link the platform C++ runtime (libc++ on
+    // macOS/Homebrew, libstdc++ on Linux/GCC).
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let cxx_runtime = if target_os == "macos" {
+        "c++"
+    } else {
+        "stdc++"
+    };
+    println!("cargo:rustc-link-lib={cxx_runtime}");
 
     println!("cargo:rerun-if-changed=wrapper.h");
 
@@ -43,4 +50,51 @@ fn main() {
         cc.include(path);
     }
     cc.file("src/x265_shim.c").compile("loom_x265_shim");
+
+    if env::var("CARGO_FEATURE_NVENC").is_ok() {
+        build_nvenc_bindings();
+    }
+}
+
+/// Locate libavcodec/libavutil via pkg-config (emitting their link lines) and
+/// generate FFI bindings for the small slice of the API the NVENC backend uses.
+fn build_nvenc_bindings() {
+    let mut include_paths = Vec::new();
+    for pkg in ["libavcodec", "libavutil"] {
+        let lib = pkg_config::Config::new().probe(pkg).unwrap_or_else(|e| {
+            panic!("{pkg} not found via pkg-config (install ffmpeg-devel): {e}")
+        });
+        include_paths.extend(lib.include_paths);
+    }
+
+    println!("cargo:rerun-if-changed=wrapper_av.h");
+    let mut builder = bindgen::Builder::default()
+        .header("wrapper_av.h")
+        // libav headers carry doxygen @code blocks; bindgen would render them as
+        // Rust doc-comment code fences that cargo then tries to run as doctests.
+        .generate_comments(false)
+        .allowlist_function("avcodec_.*")
+        .allowlist_function("av_frame_.*")
+        .allowlist_function("av_packet_.*")
+        .allowlist_function("av_opt_set.*")
+        .allowlist_type("AVCodecContext")
+        .allowlist_type("AVCodec")
+        .allowlist_type("AVFrame")
+        .allowlist_type("AVPacket")
+        .allowlist_type("AVRational")
+        .allowlist_type("AVPixelFormat")
+        .allowlist_type("AVPictureType")
+        .allowlist_var("AV_PKT_FLAG_.*")
+        .layout_tests(false);
+    for path in &include_paths {
+        builder = builder.clang_arg(format!("-I{}", path.display()));
+    }
+
+    let bindings = builder
+        .generate()
+        .expect("bindgen: failed to generate libavcodec bindings");
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out.join("av_bindings.rs"))
+        .expect("write libavcodec bindings");
 }

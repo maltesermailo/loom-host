@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Video encode: software HEVC via libx265 (M1.2). NVENC/VideoToolbox backends land later."
 
+[features]
+# Hardware HEVC via libavcodec's hevc_nvenc (M1.5). Off by default: it links
+# libavcodec/libavutil + NVENC, which only exist on the Linux/NVIDIA host.
+nvenc = []
+
 [dependencies]
 thiserror.workspace = true
 
