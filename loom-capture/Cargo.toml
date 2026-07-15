@@ -15,6 +15,15 @@ ashpd.workspace = true
 pipewire.workspace = true
 tokio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-screen-capture-kit.workspace = true
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+block2.workspace = true
+dispatch2.workspace = true
+
 [[example]]
 name = "capture-dump"
 path = "examples/capture-dump.rs"

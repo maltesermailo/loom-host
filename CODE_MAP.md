@@ -22,8 +22,9 @@ to jump to; the **§** column lists the spec sections a file implements.
                        │  endpoint → conn (I/O) → session (sans-io SM) │
                        │  tls (dev certs)                             │
                        └──────────────────────────────────────────────┘
-   loom-encode ── libx265 HEVC (M1.2, real)
-   loom-capture · loom-audio · loom-input · loom-vdisplay ·
+   loom-encode  ── libx265 HEVC (M1.2, real)
+   loom-capture ── portal/PipeWire (Linux, M1.4) · ScreenCaptureKit (macOS, M2.1)
+   loom-audio · loom-input · loom-vdisplay ·
    tools/latency-probe   ── stub crates, filled in later milestones
 ```
 
@@ -55,6 +56,31 @@ conformance vectors. `#![forbid(unsafe_code)]`.
 - `reassembly` and `clocksync` are client-role logic; they live here so `loom-proto` is a complete impl for the vectors. `loomd` uses only the encode/decode parts today.
 
 ---
+
+## `loom-capture` — screen capture (M1.4 Linux, M2.1 macOS)
+
+The two backends are **platform-exclusive** (`cfg(target_os)`, never both compiled) and
+share only `I420Buffer` + `CaptureError`. Both expose the same `start`/`fill` shape, so
+`loomd`'s media loop treats them identically; there is deliberately no trait — the
+`Source` enum in `loomd/media` is the seam. Both are damage-driven: the newest frame sits
+in a shared slot, and `loomd` does the pacing and last-frame repeat (§5.6).
+
+| File | What it is | Key symbols | § |
+|---|---|---|---|
+| [`lib.rs`](loom-capture/src/lib.rs) | Crate root; `PortalCapture` (Linux) + error type | `PortalCapture::{start,fill}`, `CaptureError` | 5.1 |
+| [`frame.rs`](loom-capture/src/frame.rs) | Tightly-packed I420 buffer (both backends) | `I420Buffer::{planes,strides}` | 4.1, 5 |
+| [`convert.rs`](loom-capture/src/convert.rs) | BGRx/RGBx → I420, BT.601 limited ‹Linux› | `to_i420`, `PixelFormat` | — |
+| [`portal.rs`](loom-capture/src/portal.rs) · [`stream.rs`](loom-capture/src/stream.rs) | Portal ScreenCast handshake + PipeWire SHM loop ‹Linux› | `open_screencast`, `run` | 5.1 |
+| [`sck.rs`](loom-capture/src/sck.rs) | ScreenCaptureKit `SCStream` (420v) ‹macOS› | `ScreenCapture::{start,fill}` | 5.2 |
+| [`nv12.rs`](loom-capture/src/nv12.rs) | NV12 → I420 chroma split ‹macOS› | `to_i420` | — |
+| [`examples/capture-dump.rs`](loom-capture/examples/capture-dump.rs) | Standalone repro: dumps raw I420 to /tmp | `main` | ARCH 14 |
+
+**macOS Screen Recording permission (TCC).** SCK refuses with `SCStreamErrorCode::UserDeclined`
+(-3801) until granted; that surfaces as `CaptureError::PermissionDenied` at `start()` —
+loudly, never as black frames. Grant it under *System Settings → Privacy & Security →
+Screen & System Audio Recording*. macOS attributes the permission to the **launching
+application**, so running `loomd` from a shell means the *terminal* is what must be listed
+(and restarted after granting), not the `loomd` binary.
 
 ## `loom-encode` — software HEVC encode (M1.2)
 
@@ -122,7 +148,6 @@ ARCHITECTURE §3. Nothing to implement yet.
 
 | File | Becomes | Milestone | § |
 |---|---|---|---|
-| [`loom-capture/src/lib.rs`](loom-capture/src/lib.rs) | Capture trait + PipeWire / ScreenCaptureKit | M1.4 / M2.1 / M6 | 5.1–5.2 |
 | [`loom-audio/src/lib.rs`](loom-audio/src/lib.rs) | Capture + Opus encode | M5 | 9 |
 | [`loom-input/src/lib.rs`](loom-input/src/lib.rs) | Injection (portal / CGEvent) + keymap | M4 | 5, PROTO 3.5 |
 | [`loom-vdisplay/src/lib.rs`](loom-vdisplay/src/lib.rs) | Virtual display (EVDI / CGVirtualDisplay) | M6 | 5.1–5.2 |

@@ -36,3 +36,12 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 # --- loom-capture (Linux portal ScreenCast → PipeWire, M1.4) ---
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
 pipewire = { version = "0.8", features = ["v0_3_77"] }
+
+# --- loom-capture (macOS ScreenCaptureKit, M2.1) ---
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "objc2-core-media"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+block2 = "0.6"
+dispatch2 = "0.3"

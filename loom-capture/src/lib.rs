@@ -12,17 +12,26 @@
 //! loop does the pacing and last-frame repeat. A portal picker dialog appears
 //! each time capture starts; restore-token persistence is deferred (M1.4+).
 //!
-//! [`PortalCapture`] and the modules behind it exist only in Linux builds — the
-//! portal/PipeWire stack has no macOS equivalent. [`I420Buffer`] and
-//! [`CaptureError`] are the cross-platform surface the ScreenCaptureKit backend
-//! (M2.1) shares.
-#![forbid(unsafe_code)]
+//! M2.1 ships the macOS twin: ScreenCaptureKit → `420v` → I420, in [`sck`].
+//! [`PortalCapture`] and [`ScreenCapture`] are platform-exclusive — each exists
+//! only in its own target's build — and share [`I420Buffer`] and
+//! [`CaptureError`]. They deliberately expose the same `start`/`fill` shape, so
+//! `loomd`'s media loop treats them identically.
+//!
+//! `deny` rather than `forbid`: the objc2 bindings are unsafe by construction, so
+//! [`sck`] alone opts back in. Every other module — including the whole Linux
+//! path — stays unsafe-free.
+#![deny(unsafe_code)]
 
 #[cfg(target_os = "linux")]
 mod convert;
 mod frame;
+#[cfg(target_os = "macos")]
+mod nv12;
 #[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "macos")]
+mod sck;
 #[cfg(target_os = "linux")]
 mod stream;
 
@@ -36,6 +45,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 pub use frame::I420Buffer;
+#[cfg(target_os = "macos")]
+pub use sck::ScreenCapture;
 
 /// Errors from the capture pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +69,19 @@ pub enum CaptureError {
     /// The capture thread ended before reporting readiness.
     #[error("capture thread exited during startup")]
     StartupAborted,
+    /// Screen Recording permission (TCC) is not granted. macOS attributes the
+    /// permission to the *launching* application, so when `loomd` is started from
+    /// a shell it is the terminal that must be listed — hence the hint.
+    #[error(
+        "Screen Recording permission denied.\n       \
+         Grant it in System Settings → Privacy & Security → Screen & System Audio Recording,\n       \
+         then restart the app you launched loomd from (the permission follows the terminal,\n       \
+         not the loomd binary)."
+    )]
+    PermissionDenied,
+    /// ScreenCaptureKit setup or streaming failed.
+    #[error("ScreenCaptureKit: {0}")]
+    ScreenCaptureKit(String),
 }
 
 #[cfg(target_os = "linux")]
