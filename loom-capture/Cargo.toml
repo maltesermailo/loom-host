@@ -5,11 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# The portal/PipeWire stack is Linux-only and links libpipewire, which does not
+# exist on macOS — target-gated so the workspace builds on the Mac host.
+[target.'cfg(target_os = "linux")'.dependencies]
 ashpd.workspace = true
 pipewire.workspace = true
 tokio.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
 
 [[example]]
 name = "capture-dump"

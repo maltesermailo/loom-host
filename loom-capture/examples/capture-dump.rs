@@ -6,12 +6,23 @@
 //! streaming pipeline — a desk-side debugging aid.
 //!
 //! Usage: `cargo run -p loom-capture --example capture-dump -- [WIDTH HEIGHT]`
+//!
+//! Linux-only: portal capture does not exist on the macOS host.
 
+#[cfg(target_os = "linux")]
 use std::io::Write;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use loom_capture::{I420Buffer, PortalCapture};
 
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("capture-dump: portal capture is Linux-only");
+}
+
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let width: u32 = args.next().map(|s| s.parse()).transpose()?.unwrap_or(2560);
