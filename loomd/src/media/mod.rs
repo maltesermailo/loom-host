@@ -259,8 +259,14 @@ fn run(
         }
 
         let capture_ts = crate::clock::host_now_us();
+        let encode_start = Instant::now();
         match encoder.encode_i420(planes, strides, frame_seq as i64, force_idr) {
             Ok(Some(au)) => {
+                // ARCHITECTURE §10 budgets encode at 3–6 ms and §12 says every stage
+                // is measured, not assumed; this is the number ROADMAP M1.5/M2.3
+                // hold to ≤ 6 ms at 1440p72.
+                let encode_us = encode_start.elapsed().as_micros() as u64;
+
                 if force_idr {
                     tracing::info!(target: "loom::media", event = "idr_forced", frame_seq);
                 }
@@ -282,7 +288,8 @@ fn run(
                     sent += 1;
                 }
                 tracing::info!(target: "loom::media", event = "frame_sent", frame_seq,
-                    keyframe = au.keyframe, frags = total, sent, capture_ts);
+                    keyframe = au.keyframe, frags = total, sent, capture_ts, encode_us,
+                    bytes = au.data.len());
                 frame_seq = frame_seq.wrapping_add(1);
             }
             Ok(None) => {}

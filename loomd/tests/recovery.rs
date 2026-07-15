@@ -292,3 +292,90 @@ async fn nvenc_freeze_idr_request_recovery_under_200ms() {
         "nvenc recovery {recovery:?} exceeds the 200 ms budget"
     );
 }
+
+// M2.3: IDR recovery must stay < 200 ms through the *real VideoToolbox* encoder.
+// Synthetic source for the same reason the NVENC variant uses one: recovery is
+// encoder-driven (forced IDR on request) and independent of the capture source,
+// and a test that captured the live desktop would depend on what is on screen.
+// The SCK→VideoToolbox loop under --drop-percent is exercised separately by the
+// demo script. Target-gated, so this runs in the default check.sh on macOS.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn videotoolbox_freeze_idr_request_recovery_under_200ms() {
+    let addr = spawn_host(1, loomd::media::EncoderKind::VideoToolbox);
+    let (_ep, conn, mut send, mut recv) = connect(addr).await;
+
+    send_msg(&mut send, control::HELLO, &hello()).await;
+    assert_eq!(read_msg(&mut recv).await, control::WELCOME);
+    assert_eq!(read_msg(&mut recv).await, control::CONFIG);
+    send_msg(
+        &mut send,
+        control::CONFIG_ACK,
+        &[(Value::Int(0), Value::Int(1))],
+    )
+    .await;
+    assert_eq!(read_msg(&mut recv).await, control::START);
+
+    let mut reasm = Reassembler::new();
+    let clock = Instant::now();
+    let mut freeze_at: Option<Instant> = None;
+    let mut recovery: Option<Duration> = None;
+    let deadline = Instant::now() + Duration::from_secs(8);
+
+    while Instant::now() < deadline && recovery.is_none() {
+        let dg = tokio::select! {
+            d = conn.read_datagram() => match d { Ok(d) => d, Err(_) => break },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+        };
+        let Ok(dec) = datagram::decode(&dg) else {
+            continue;
+        };
+        if dec.header.stream_id != 0 {
+            continue;
+        }
+        let before = reasm.events().len();
+        reasm.push(
+            clock.elapsed().as_millis() as i64,
+            Fragment {
+                frame_seq: dec.header.frame_seq,
+                frag_index: dec.header.frag_index,
+                frag_count: dec.header.frag_count,
+                keyframe: dec.header.keyframe,
+            },
+        );
+        let mut idr_last_good: Option<u32> = None;
+        let mut delivered_keyframe = false;
+        for ev in &reasm.events()[before..] {
+            match ev {
+                Event::IdrRequest { last_good, .. } => idr_last_good = Some(*last_good),
+                Event::Deliver { keyframe: true, .. } => delivered_keyframe = true,
+                _ => {}
+            }
+        }
+        if let Some(last_good) = idr_last_good {
+            if freeze_at.is_none() {
+                freeze_at = Some(Instant::now());
+            }
+            send_msg(
+                &mut send,
+                control::IDR_REQUEST,
+                &[(Value::Int(0), Value::Int(last_good as i128))],
+            )
+            .await;
+        }
+        if delivered_keyframe {
+            if let Some(f) = freeze_at.take() {
+                recovery = Some(f.elapsed());
+            }
+        }
+    }
+
+    let recovery =
+        recovery.expect("no freeze→recovery cycle observed under 1% loss (videotoolbox)");
+    // Printed, not just asserted: M2.3 wants the measured number on the record.
+    println!("videotoolbox freeze→recovery: {recovery:?} (budget 200 ms)");
+    assert!(
+        recovery < Duration::from_millis(200),
+        "videotoolbox recovery {recovery:?} exceeds the 200 ms budget"
+    );
+}

@@ -23,10 +23,16 @@
 //! scene cut and asserts no unrequested IDR appears — see
 //! `loomd/tests/bitstream_conformance.rs`.
 //!
-//! Input is a CPU I420 buffer: it is copied into a `y420` CVPixelBuffer from the
-//! session's own pool (the copy VideoToolbox would otherwise make internally).
-//! Handing SCK's CVPixelBuffer straight through, skipping the I420 round-trip, is
-//! a deferred optimization — TODO(M2.3), pending the latency numbers.
+//! Input is a CPU I420 buffer, copied into an **NV12** pixel buffer from the
+//! session's own pool. NV12 is what the media engine consumes natively; handing
+//! it planar I420 instead costs 1.4 ms/frame at 1440p (10.2 → 8.8) in a
+//! conversion VideoToolbox performs *inside* the encode.
+//!
+//! The remaining ~8.4 ms/frame at 1440p is the engine's latency under §5.3, and
+//! is not recoverable here: single-reference with no reordering makes frame N
+//! depend on N-1, so the encoder is a serial chain — measured latency and
+//! throughput are equal (8.4 ms, 118 fps), and neither QoS, ExpectedFrameRate,
+//! nor RequireHardwareAcceleratedVideoEncoder moves it. See `reviews/M2.3`.
 
 // The VideoToolbox/CoreFoundation bindings are unsafe by construction.
 #![allow(unsafe_code)]
@@ -44,9 +50,10 @@ use objc2_core_media::{
 };
 use objc2_core_video::{
     kCVPixelBufferHeightKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
-    kCVPixelFormatType_420YpCbCr8Planar, CVPixelBuffer, CVPixelBufferGetBaseAddressOfPlane,
-    CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-    CVPixelBufferPool, CVPixelBufferUnlockBaseAddress,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, CVPixelBuffer,
+    CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+    CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
+    CVPixelBufferUnlockBaseAddress,
 };
 use objc2_video_toolbox::{
     kVTCompressionPropertyKey_AllowFrameReordering,
@@ -339,7 +346,13 @@ impl VideoToolboxEncoder {
         Ok(sink.au.take())
     }
 
-    /// Copy the I420 planes into a `y420` pixel buffer from the session's pool.
+    /// Copy the I420 planes into an NV12 pixel buffer from the session's pool,
+    /// interleaving the chroma on the way in.
+    ///
+    /// NV12 rather than the planar `y420` this first shipped with: measured at
+    /// 1440p72, feeding the encoder its native layout cuts encode from 10.2 ms to
+    /// 8.8 ms, because VideoToolbox otherwise converts internally — inside the
+    /// encode, where the cost is invisible to a caller timing its own memcpy.
     fn fill_pixel_buffer(
         &self,
         planes: [&[u8]; 3],
@@ -365,15 +378,30 @@ impl VideoToolboxEncoder {
                 return Err(EncodeError::VideoToolbox(status));
             }
 
-            for (index, (src, src_stride)) in planes.iter().zip(strides).enumerate() {
-                let base = CVPixelBufferGetBaseAddressOfPlane(&pixels, index).cast::<u8>();
-                let dst_stride = CVPixelBufferGetBytesPerRowOfPlane(&pixels, index);
-                let rows = src.len() / src_stride.max(1) as usize;
+            let (luma_stride, chroma_stride) = (strides[0] as usize, strides[1] as usize);
 
-                for row in 0..rows {
-                    let from = src[row * src_stride as usize..].as_ptr();
-                    let to = base.add(row * dst_stride);
-                    std::ptr::copy_nonoverlapping(from, to, src_stride as usize);
+            let luma = CVPixelBufferGetBaseAddressOfPlane(&pixels, 0).cast::<u8>();
+            let dst_luma_stride = CVPixelBufferGetBytesPerRowOfPlane(&pixels, 0);
+            for row in 0..planes[0].len() / luma_stride.max(1) {
+                std::ptr::copy_nonoverlapping(
+                    planes[0][row * luma_stride..].as_ptr(),
+                    luma.add(row * dst_luma_stride),
+                    luma_stride,
+                );
+            }
+
+            let chroma = CVPixelBufferGetBaseAddressOfPlane(&pixels, 1).cast::<u8>();
+            let dst_chroma_stride = CVPixelBufferGetBytesPerRowOfPlane(&pixels, 1);
+            for row in 0..planes[1].len() / chroma_stride.max(1) {
+                let (u_row, v_row) = (
+                    &planes[1][row * chroma_stride..],
+                    &planes[2][row * chroma_stride..],
+                );
+                let dst_row = chroma.add(row * dst_chroma_stride);
+
+                for i in 0..chroma_stride {
+                    *dst_row.add(2 * i) = u_row[i];
+                    *dst_row.add(2 * i + 1) = v_row[i];
                 }
             }
 
@@ -507,11 +535,13 @@ fn cf_bool(value: bool) -> CFRetained<CFBoolean> {
     CFBoolean::new(value).retain()
 }
 
-/// Source pixel-buffer attributes: planar I420 at the encode size, so the pool
-/// hands back buffers `encode_i420` can memcpy its planes straight into.
+/// Source pixel-buffer attributes: NV12 at the encode size — the layout Apple's
+/// media engine consumes natively, so VideoToolbox does no conversion of its own.
+/// Video range, matching what ScreenCaptureKit delivers and what the Linux
+/// converter produces.
 fn source_image_attributes(width: u32, height: u32) -> CFRetained<CFDictionary<CFString, CFType>> {
     let (format, width, height) = (
-        CFNumber::new_i32(kCVPixelFormatType_420YpCbCr8Planar as i32),
+        CFNumber::new_i32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange as i32),
         CFNumber::new_i32(width as i32),
         CFNumber::new_i32(height as i32),
     );
