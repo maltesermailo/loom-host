@@ -18,9 +18,8 @@ use std::time::Duration;
 use pipewire as pw;
 use pw::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pw::spa::param::format_utils;
-use pw::spa::param::video::VideoFormat;
+use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::param::ParamType;
-use pw::spa::pod::deserialize::PodDeserializer;
 use pw::spa::pod::serialize::PodSerializer;
 use pw::spa::pod::{ChoiceValue, Object, Pod, Property, PropertyFlags, Value};
 use pw::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
@@ -190,11 +189,24 @@ fn on_format(ud: &mut Rc<RefCell<StreamData>>, param: &Pod) -> Result<(), Captur
         return Ok(());
     }
 
-    let obj = format_object(param)
-        .ok_or_else(|| CaptureError::Pipewire("format not an object".into()))?;
-    let fmt = pixel_format(&obj)?;
-    let (w, h) =
-        format_size(&obj).ok_or_else(|| CaptureError::Pipewire("format has no size".into()))?;
+    // Use the canonical spa parser (spa_format_video_raw_parse) rather than
+    // walking pod properties by hand — the fixated VideoFormat isn't a plain
+    // Value::Id when deserialized generically.
+    let mut info = VideoInfoRaw::new();
+    info.parse(param)
+        .map_err(|e| CaptureError::Pipewire(format!("parse video format: {e}")))?;
+
+    let fmt = match info.format() {
+        VideoFormat::BGRA | VideoFormat::BGRx => PixelFormat::BGRX,
+        VideoFormat::RGBA | VideoFormat::RGBx => PixelFormat::RGBX,
+        other => {
+            return Err(CaptureError::Pipewire(format!(
+                "unexpected pixel format {other:?}"
+            )))
+        }
+    };
+    let size = info.size();
+    let (w, h) = (size.width, size.height);
 
     let mut s = ud.borrow_mut();
     if (w, h) != s.expected {
@@ -244,43 +256,6 @@ fn report(ud: &Rc<RefCell<StreamData>>, result: Result<(), CaptureError>) {
     if let Some(tx) = ud.borrow_mut().ready.take() {
         let _ = tx.send(result);
     }
-}
-
-/// Map a negotiated `VideoFormat` to the converter's byte layout.
-fn pixel_format(obj: &Object) -> Result<PixelFormat, CaptureError> {
-    for p in &obj.properties {
-        if p.key == FormatProperties::VideoFormat.as_raw() {
-            if let Value::Id(Id(raw)) = p.value {
-                return match VideoFormat::from_raw(raw) {
-                    VideoFormat::BGRA | VideoFormat::BGRx => Ok(PixelFormat::BGRX),
-                    VideoFormat::RGBA | VideoFormat::RGBx => Ok(PixelFormat::RGBX),
-                    other => Err(CaptureError::Pipewire(format!(
-                        "unexpected format {other:?}"
-                    ))),
-                };
-            }
-        }
-    }
-    Err(CaptureError::Pipewire("format has no VideoFormat".into()))
-}
-
-fn format_object(param: &Pod) -> Option<Object> {
-    let (_, value) = PodDeserializer::deserialize_from::<Value>(param.as_bytes()).ok()?;
-    match value {
-        Value::Object(o) => Some(o),
-        _ => None,
-    }
-}
-
-fn format_size(obj: &Object) -> Option<(u32, u32)> {
-    for p in &obj.properties {
-        if p.key == FormatProperties::VideoSize.as_raw() {
-            if let Value::Rectangle(r) = p.value {
-                return Some((r.width, r.height));
-            }
-        }
-    }
-    None
 }
 
 /// Build an SHM `video/raw` EnumFormat pod fixed to `expected` size. Lists the
