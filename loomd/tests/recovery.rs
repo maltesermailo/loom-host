@@ -55,6 +55,7 @@ fn spawn_host(drop_percent: u32) -> std::net::SocketAddr {
             height: 240,
             ..MediaParams::default()
         },
+        source: loomd::media::CaptureSource::Synthetic,
         drop_percent,
     };
     let slot = Arc::new(Semaphore::new(1));

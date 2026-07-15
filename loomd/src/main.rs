@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 
 use loomd::conn::HostCfg;
+use loomd::media::CaptureSource;
 use loomd::session::MediaParams;
 use loomd::{endpoint, BoxErr};
 
@@ -30,6 +31,12 @@ struct Args {
     /// Virtual display height in pixels (even).
     #[arg(long, default_value_t = 1440)]
     height: u32,
+
+    /// Frame source. `synthetic` is the M1.2 test pattern (default, all
+    /// platforms); `portal` is real Linux desktop capture (M1.4) and requires
+    /// `--width/--height` to match the monitor's native resolution.
+    #[arg(long, value_enum, default_value_t = CaptureSource::Synthetic)]
+    source: CaptureSource,
 
     /// Skip peer certificate verification. REQUIRED to accept any connection
     /// until certificate pinning lands in M7 — there is currently no way to
@@ -84,6 +91,7 @@ async fn main() -> Result<(), BoxErr> {
     let cfg = HostCfg {
         name: args.name,
         params,
+        source: args.source,
         drop_percent: args.drop_percent,
     };
     endpoint::accept_loop(endpoint, cfg).await;

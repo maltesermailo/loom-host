@@ -39,6 +39,7 @@ fn spawn_host() -> SocketAddr {
             height: 240,
             ..MediaParams::default()
         },
+        source: loomd::media::CaptureSource::Synthetic,
         drop_percent: 0,
     };
     // Mirror endpoint::accept_loop but keep the handle-per-conn behaviour under

@@ -10,3 +10,7 @@ pipewire.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[[example]]
+name = "capture-dump"
+path = "examples/capture-dump.rs"

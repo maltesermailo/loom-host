@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 loom-proto = { path = "../loom-proto" }
+loom-capture = { path = "../loom-capture" }
 loom-encode = { path = "../loom-encode" }
 tokio.workspace = true
 quinn.workspace = true

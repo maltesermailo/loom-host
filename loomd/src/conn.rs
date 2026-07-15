@@ -29,6 +29,8 @@ pub struct HostCfg {
     pub name: String,
     /// Media parameters advertised in CONFIG.
     pub params: MediaParams,
+    /// Frame source the media thread encodes (`--source`).
+    pub source: media::CaptureSource,
     /// Dev datagram-loss injection percentage (`--drop-percent`; 0 = none).
     pub drop_percent: u32,
 }
@@ -138,10 +140,12 @@ async fn drive(
                 send_frame(send, msg_type, &body).await?;
             }
             Output::StartMedia => {
-                // Spawn the synthetic media pipeline on its own thread (§5 / M1.2).
+                // Spawn the media pipeline (synthetic or portal capture) on its
+                // own thread; §5 encode + §4 fragmentation are source-agnostic.
                 *media = Some(media::spawn(
                     connection.clone(),
                     cfg.params,
+                    cfg.source,
                     cfg.drop_percent,
                 ));
             }

@@ -18,11 +18,36 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use quinn::Connection;
 
+use loom_capture::{I420Buffer, PortalCapture};
 use loom_encode::HevcEncoder;
 use loom_proto::datagram;
 
 use crate::session::MediaParams;
 use testpattern::TestPattern;
+
+/// Which frame source the media thread encodes. Selected by loomd config
+/// (`--source`), not a protocol concern: the client sees identical §4/§5 wire
+/// output either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CaptureSource {
+    /// The synthetic test pattern (M1.2) — cross-platform, the default so the
+    /// conformance/recovery tests and the Mac loopback are unaffected.
+    Synthetic,
+    /// Real desktop capture via the Linux portal (M1.4). Linux-only; pops a
+    /// portal picker dialog when a session starts.
+    Portal,
+}
+
+/// The live frame source, resolved once when the media thread starts. Both arms
+/// yield tightly-packed I420 planes/strides for [`HevcEncoder::encode_i420`].
+enum Source {
+    Synthetic(TestPattern),
+    Portal {
+        capture: PortalCapture,
+        frame: I420Buffer,
+        have: bool,
+    },
+}
 
 /// Handle to a running media thread. Dropping it detaches; [`Self::join`] waits.
 pub struct MediaHandle {
@@ -44,18 +69,29 @@ impl MediaHandle {
     }
 }
 
-/// Spawn the media thread for a session. `drop_percent` injects deterministic
-/// datagram loss for testing (0 = none).
-pub fn spawn(connection: Connection, params: MediaParams, drop_percent: u32) -> MediaHandle {
+/// Spawn the media thread for a session. `source` selects the frame source;
+/// `drop_percent` injects deterministic datagram loss for testing (0 = none).
+pub fn spawn(
+    connection: Connection,
+    params: MediaParams,
+    source: CaptureSource,
+    drop_percent: u32,
+) -> MediaHandle {
     let (idr_tx, idr_rx) = mpsc::channel();
-    let join = std::thread::spawn(move || run(connection, params, drop_percent, idr_rx));
+    let join = std::thread::spawn(move || run(connection, params, source, drop_percent, idr_rx));
     MediaHandle {
         idr_tx,
         join: Some(join),
     }
 }
 
-fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: Receiver<()>) {
+fn run(
+    connection: Connection,
+    params: MediaParams,
+    source_kind: CaptureSource,
+    drop_percent: u32,
+    idr_rx: Receiver<()>,
+) {
     let (w, h) = (params.width as usize, params.height as usize);
     let cfg = constraints::encoder_config(
         params.width as u32,
@@ -71,7 +107,13 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
         }
     };
 
-    let mut pattern = TestPattern::new(w, h);
+    let mut source = match open_source(source_kind, &params) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(target: "loom::media", error = %e, "capture open failed");
+            return;
+        }
+    };
     let mut drop_gen = DropInjector::new(drop_percent);
     let mut frame_seq: u32 = 0;
     let interval = Duration::from_secs_f64(1.0 / params.refresh.max(1) as f64);
@@ -96,14 +138,35 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
         // Coalesce any pending IDR requests into one forced IDR.
         let force_idr = idr_rx.try_iter().count() > 0;
 
-        pattern.render(frame_seq);
+        // Produce this tick's I420 frame. Portal capture is damage-driven, so
+        // before its first frame we simply wait a tick; once it has delivered,
+        // the held frame repeats when nothing new arrived (§5.6 freshness).
+        let (planes, strides);
+        match &mut source {
+            Source::Synthetic(pattern) => {
+                pattern.render(frame_seq);
+                planes = pattern.planes();
+                strides = pattern.strides();
+            }
+            Source::Portal {
+                capture,
+                frame,
+                have,
+            } => {
+                if capture.fill(frame) {
+                    *have = true;
+                }
+                if !*have {
+                    pace(&mut next, interval);
+                    continue;
+                }
+                planes = frame.planes();
+                strides = frame.strides();
+            }
+        }
+
         let capture_ts = crate::clock::host_now_us();
-        match encoder.encode_i420(
-            pattern.planes(),
-            pattern.strides(),
-            frame_seq as i64,
-            force_idr,
-        ) {
+        match encoder.encode_i420(planes, strides, frame_seq as i64, force_idr) {
             Ok(Some(au)) => {
                 if force_idr {
                     tracing::info!(target: "loom::media", event = "idr_forced", frame_seq);
@@ -136,15 +199,44 @@ fn run(connection: Connection, params: MediaParams, drop_percent: u32, idr_rx: R
             }
         }
 
-        next += interval;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else {
-            next = now; // fell behind; don't accumulate debt
-        }
+        pace(&mut next, interval);
     }
     tracing::info!(target: "loom::media", event = "media_stop", frames = frame_seq);
+}
+
+/// Resolve the configured [`CaptureSource`] into a live [`Source`]. Portal
+/// capture blocks here through the picker dialog + first format negotiation, so
+/// a size mismatch or cancellation surfaces before the encode loop starts.
+fn open_source(
+    kind: CaptureSource,
+    params: &MediaParams,
+) -> Result<Source, Box<dyn std::error::Error>> {
+    let (w, h) = (params.width as u32, params.height as u32);
+
+    match kind {
+        CaptureSource::Synthetic => Ok(Source::Synthetic(TestPattern::new(w as usize, h as usize))),
+        CaptureSource::Portal => {
+            let capture = PortalCapture::start(w, h, params.refresh as u32)?;
+            Ok(Source::Portal {
+                capture,
+                frame: I420Buffer::new(w, h),
+                have: false,
+            })
+        }
+    }
+}
+
+/// Sleep until the next frame deadline, dropping accumulated debt if we fell
+/// behind (the encoder paces itself at the configured refresh, §5.6).
+fn pace(next: &mut Instant, interval: Duration) {
+    *next += interval;
+
+    let now = Instant::now();
+    if *next > now {
+        std::thread::sleep(*next - now);
+    } else {
+        *next = now;
+    }
 }
 
 /// Deterministic per-datagram loss injector (`--drop-percent`). A fixed-seed
