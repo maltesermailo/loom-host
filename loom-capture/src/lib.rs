@@ -12,17 +12,27 @@
 //! loop does the pacing and last-frame repeat. A portal picker dialog appears
 //! each time capture starts; restore-token persistence is deferred (M1.4+).
 //!
-//! The macOS ScreenCaptureKit backend arrives in M2.1.
+//! [`PortalCapture`] and the modules behind it exist only in Linux builds — the
+//! portal/PipeWire stack has no macOS equivalent. [`I420Buffer`] and
+//! [`CaptureError`] are the cross-platform surface the ScreenCaptureKit backend
+//! (M2.1) shares.
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
 mod convert;
 mod frame;
+#[cfg(target_os = "linux")]
 mod portal;
+#[cfg(target_os = "linux")]
 mod stream;
 
+#[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::thread::JoinHandle;
 
 pub use frame::I420Buffer;
@@ -50,6 +60,7 @@ pub enum CaptureError {
     StartupAborted,
 }
 
+#[cfg(target_os = "linux")]
 impl CaptureError {
     fn portal(e: impl std::fmt::Display) -> Self {
         CaptureError::Portal(e.to_string())
@@ -58,12 +69,14 @@ impl CaptureError {
 
 /// A running portal ScreenCast capture. Frames flow into a shared slot; poll the
 /// newest with [`Self::fill`]. Dropping it stops the capture thread.
+#[cfg(target_os = "linux")]
 pub struct PortalCapture {
     slot: stream::FrameSlot,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(target_os = "linux")]
 impl PortalCapture {
     /// Start capturing a user-selected monitor at `width`×`height`. Blocks
     /// through the portal handshake (picker dialog) and the first format
@@ -124,6 +137,7 @@ impl PortalCapture {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for PortalCapture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

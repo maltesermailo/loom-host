@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use quinn::Connection;
 
+#[cfg(target_os = "linux")]
 use loom_capture::{I420Buffer, PortalCapture};
 #[cfg(feature = "nvenc")]
 use loom_encode::NvencEncoder;
@@ -35,8 +36,9 @@ pub enum CaptureSource {
     /// The synthetic test pattern (M1.2) — cross-platform, the default so the
     /// conformance/recovery tests and the Mac loopback are unaffected.
     Synthetic,
-    /// Real desktop capture via the Linux portal (M1.4). Linux-only; pops a
-    /// portal picker dialog when a session starts.
+    /// Real desktop capture via the Linux portal (M1.4). Exists only in a Linux
+    /// build; pops a portal picker dialog when a session starts.
+    #[cfg(target_os = "linux")]
     Portal,
 }
 
@@ -44,6 +46,7 @@ pub enum CaptureSource {
 /// yield tightly-packed I420 planes/strides for [`HevcEncoder::encode_i420`].
 enum Source {
     Synthetic(TestPattern),
+    #[cfg(target_os = "linux")]
     Portal {
         capture: PortalCapture,
         frame: I420Buffer,
@@ -197,6 +200,7 @@ fn run(
                 planes = pattern.planes();
                 strides = pattern.strides();
             }
+            #[cfg(target_os = "linux")]
             Source::Portal {
                 capture,
                 frame,
@@ -264,6 +268,7 @@ fn open_source(
 
     match kind {
         CaptureSource::Synthetic => Ok(Source::Synthetic(TestPattern::new(w as usize, h as usize))),
+        #[cfg(target_os = "linux")]
         CaptureSource::Portal => {
             let capture = PortalCapture::start(w, h, params.refresh as u32)?;
             Ok(Source::Portal {
