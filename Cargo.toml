@@ -41,7 +41,11 @@ pipewire = { version = "0.8", features = ["v0_3_77"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "objc2-core-media"] }
-objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "objc2-core-video"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMSampleBuffer", "CMTime", "CMBlockBuffer", "CMFormatDescription", "objc2-core-video"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 block2 = "0.6"
 dispatch2 = "0.3"
+
+# --- loom-encode (macOS VideoToolbox, M2.2) ---
+objc2-video-toolbox = { version = "0.3", default-features = false, features = ["std", "VTCompressionSession", "VTCompressionProperties", "VTSession", "VTErrors", "objc2-core-media", "objc2-core-video"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFDictionary", "CFNumber", "CFString", "CFBase"] }

@@ -16,6 +16,13 @@ mod nvenc;
 #[cfg(feature = "nvenc")]
 pub use nvenc::NvencEncoder;
 
+#[cfg(target_os = "macos")]
+mod annexb;
+#[cfg(target_os = "macos")]
+mod videotoolbox;
+#[cfg(target_os = "macos")]
+pub use videotoolbox::VideoToolboxEncoder;
+
 use std::ffi::{c_void, CString};
 
 /// libx265 NAL type for IDR access units (§5.2), from `x265.h`.
@@ -50,6 +57,25 @@ pub enum EncodeError {
     #[cfg(feature = "nvenc")]
     #[error("libavcodec error {0}")]
     Av(i32),
+    /// A VideoToolbox call failed with the given `OSStatus`.
+    #[cfg(target_os = "macos")]
+    #[error("VideoToolbox OSStatus {0}")]
+    VideoToolbox(i32),
+    /// VideoToolbox rejected a §5 property. Names the key, because an `OSStatus`
+    /// on its own cannot be diagnosed — and a §5 knob this encoder will not accept
+    /// is a spec-conformance question, not a routine error.
+    #[cfg(target_os = "macos")]
+    #[error("VideoToolbox rejected property {key}: OSStatus {status}")]
+    VideoToolboxProperty {
+        /// The `kVTCompressionPropertyKey_*` that was refused.
+        key: &'static str,
+        /// The `OSStatus` returned (-12900 = kVTPropertyNotSupportedErr).
+        status: i32,
+    },
+    /// The encoder produced a bitstream this crate could not interpret.
+    #[cfg(target_os = "macos")]
+    #[error("bitstream: {0}")]
+    Bitstream(&'static str),
 }
 
 /// Encoder configuration. The §5 knobs are explicit so the *policy* lives in the

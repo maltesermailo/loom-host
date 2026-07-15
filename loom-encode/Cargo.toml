@@ -13,6 +13,14 @@ nvenc = []
 [dependencies]
 thiserror.workspace = true
 
+# VideoToolbox is a system framework on macOS (M2.2) — target-gated, not
+# feature-gated: unlike NVENC it needs nothing installed to be present.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-video-toolbox.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-media.workspace = true
+objc2-core-video.workspace = true
+
 [build-dependencies]
 # libx265 has a large C struct API; bindgen generates it from the Homebrew
 # headers located via pkg-config. cc compiles the one-line version-macro shim.
