@@ -20,6 +20,8 @@ use quinn::Connection;
 
 #[cfg(target_os = "linux")]
 use loom_capture::{I420Buffer, PortalCapture};
+#[cfg(target_os = "macos")]
+use loom_capture::{I420Buffer, ScreenCapture};
 #[cfg(feature = "nvenc")]
 use loom_encode::NvencEncoder;
 use loom_encode::{AccessUnit, EncodeError, EncoderConfig, HevcEncoder};
@@ -40,6 +42,10 @@ pub enum CaptureSource {
     /// build; pops a portal picker dialog when a session starts.
     #[cfg(target_os = "linux")]
     Portal,
+    /// Real desktop capture via ScreenCaptureKit (M2.1). Exists only in a macOS
+    /// build; needs Screen Recording permission, which it demands loudly.
+    #[cfg(target_os = "macos")]
+    Sck,
 }
 
 /// The live frame source, resolved once when the media thread starts. Both arms
@@ -49,6 +55,12 @@ enum Source {
     #[cfg(target_os = "linux")]
     Portal {
         capture: PortalCapture,
+        frame: I420Buffer,
+        have: bool,
+    },
+    #[cfg(target_os = "macos")]
+    Sck {
+        capture: ScreenCapture,
         frame: I420Buffer,
         have: bool,
     },
@@ -216,6 +228,22 @@ fn run(
                 planes = frame.planes();
                 strides = frame.strides();
             }
+            #[cfg(target_os = "macos")]
+            Source::Sck {
+                capture,
+                frame,
+                have,
+            } => {
+                if capture.fill(frame) {
+                    *have = true;
+                }
+                if !*have {
+                    pace(&mut next, interval);
+                    continue;
+                }
+                planes = frame.planes();
+                strides = frame.strides();
+            }
         }
 
         let capture_ts = crate::clock::host_now_us();
@@ -272,6 +300,15 @@ fn open_source(
         CaptureSource::Portal => {
             let capture = PortalCapture::start(w, h, params.refresh as u32)?;
             Ok(Source::Portal {
+                capture,
+                frame: I420Buffer::new(w, h),
+                have: false,
+            })
+        }
+        #[cfg(target_os = "macos")]
+        CaptureSource::Sck => {
+            let capture = ScreenCapture::start(w, h, params.refresh as u32)?;
+            Ok(Source::Sck {
                 capture,
                 frame: I420Buffer::new(w, h),
                 have: false,

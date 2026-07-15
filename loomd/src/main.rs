@@ -34,7 +34,8 @@ struct Args {
 
     /// Frame source. `synthetic` is the M1.2 test pattern (default, all
     /// platforms); `portal` is real Linux desktop capture (M1.4) and requires
-    /// `--width/--height` to match the monitor's native resolution.
+    /// `--width/--height` to match the monitor's native resolution; `sck` is real
+    /// macOS desktop capture (M2.1), which scales the display to `--width/--height`.
     #[arg(long, value_enum, default_value_t = CaptureSource::Synthetic)]
     source: CaptureSource,
 
