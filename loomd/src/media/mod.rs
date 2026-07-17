@@ -160,6 +160,54 @@ pub fn spawn(
     }
 }
 
+/// Encode `frames` of the synthetic test pattern to a raw Annex-B `.hevc` file
+/// and return, opening no network connection. This is the M3.2 "looped local
+/// test bitstream" for Quest decoder bring-up (ROADMAP M3.2): the client has no
+/// host to talk to yet, so it decodes this on-device instead.
+///
+/// The stream is byte-for-byte what the live path produces — same
+/// [`constraints::encoder_config`], same [`TestPattern`], frame 0 forced IDR and
+/// the rest single-ref P-frames — so it exercises exactly the §5 shape M3.3 will
+/// stream, and the burned-in frame counter gives R5 a visual latency reference.
+/// The client loops the file; each loop restarts cleanly at frame 0's IDR.
+pub fn dump_hevc(
+    path: &std::path::Path,
+    params: MediaParams,
+    encoder_kind: EncoderKind,
+    frames: u32,
+) -> Result<(), crate::BoxErr> {
+    let cfg = constraints::encoder_config(
+        params.width as u32,
+        params.height as u32,
+        params.refresh as u32,
+        params.bitrate_kbps as u32,
+    );
+    let mut encoder = open_encoder(encoder_kind, cfg)?;
+    let mut pattern = TestPattern::new(params.width as usize, params.height as usize);
+
+    let file = std::fs::File::create(path)?;
+    let mut out = std::io::BufWriter::new(file);
+
+    for frame_seq in 0..frames {
+        pattern.render(frame_seq);
+
+        // Only the first frame is an IDR (§5.4: infinite GOP, no periodic
+        // keyframes); the loop boundary re-enters at this same IDR on the client.
+        let force_idr = frame_seq == 0;
+        if let Some(au) = encoder.encode_i420(
+            pattern.planes(),
+            pattern.strides(),
+            frame_seq as i64,
+            force_idr,
+        )? {
+            std::io::Write::write_all(&mut out, &au.data)?;
+        }
+    }
+    std::io::Write::flush(&mut out)?;
+
+    Ok(())
+}
+
 fn run(
     connection: Connection,
     params: MediaParams,

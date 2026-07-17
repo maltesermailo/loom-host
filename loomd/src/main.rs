@@ -55,6 +55,17 @@ struct Args {
     /// seeded) to exercise the freeze→IDR_REQUEST→recovery path. 0 = none.
     #[arg(long, default_value_t = 0)]
     drop_percent: u32,
+
+    /// Dev only: instead of serving, encode `--dump-frames` frames of the
+    /// synthetic pattern to this raw Annex-B `.hevc` file and exit. This is the
+    /// M3.2 offline test bitstream for Quest decoder bring-up (no network).
+    #[arg(long)]
+    dump_hevc: Option<std::path::PathBuf>,
+
+    /// Frame count for `--dump-hevc`. The client loops the file, so a few hundred
+    /// frames give plenty of decode samples for the R5 measurement.
+    #[arg(long, default_value_t = 600)]
+    dump_frames: u32,
 }
 
 #[tokio::main]
@@ -80,6 +91,24 @@ async fn main() -> Result<(), BoxErr> {
         std::process::exit(2);
     }
     eprintln!("loomd: WARNING --insecure-dev — peer certificate verification is OFF (TODO M7).");
+
+    if let Some(path) = &args.dump_hevc {
+        let params = MediaParams {
+            width: args.width as u64,
+            height: args.height as u64,
+            ..MediaParams::default()
+        };
+        eprintln!(
+            "loomd: dumping {} synthetic HEVC frames ({}×{}) to {}",
+            args.dump_frames,
+            args.width,
+            args.height,
+            path.display()
+        );
+        loomd::media::dump_hevc(path, params, args.encoder, args.dump_frames)?;
+        eprintln!("loomd: dump complete");
+        return Ok(());
+    }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], args.port));
     let endpoint = endpoint::server(addr)?;
