@@ -77,10 +77,8 @@ pub struct Reassembler {
     incomplete: BTreeMap<u32, Incomplete>,
     events: Vec<Event>,
     counters: Counters,
-    idr_outstanding: bool,
+    /// Last IDR request time — the §3.6 rate limit / retry cadence.
     idr_last_t: Option<i64>,
-    /// `last_decoded` captured at the moment the outstanding IDR was requested.
-    idr_last_good_at_request: Option<i64>,
 }
 
 impl Default for Reassembler {
@@ -98,9 +96,7 @@ impl Reassembler {
             incomplete: BTreeMap::new(),
             events: Vec::new(),
             counters: Counters::default(),
-            idr_outstanding: false,
             idr_last_t: None,
-            idr_last_good_at_request: None,
         }
     }
 
@@ -189,24 +185,12 @@ impl Reassembler {
             keyframe,
         });
         self.last_decoded = Some(i64::from(seq));
-        // An outstanding IDR clears once we deliver a keyframe newer than the
-        // last-good frame recorded when it was requested (§3.6).
-        if keyframe && self.idr_outstanding {
-            let clears = match self.idr_last_good_at_request {
-                None => true,
-                Some(g) => i64::from(seq) > g,
-            };
-            if clears {
-                self.idr_outstanding = false;
-            }
-        }
     }
 
     fn maybe_idr(&mut self, t_ms: i64) {
-        if self.idr_outstanding {
-            return;
-        }
-        // Rate limit: at most one IDR request per 250 ms (§3.6).
+        // §3.6: at most one IDR request per 250 ms. The request is re-issued at
+        // that cadence while the client still cannot decode (each gap-discard
+        // calls this), so a lost recovery IDR does not stall recovery forever.
         if let Some(last) = self.idr_last_t {
             if t_ms - last < 250 {
                 return;
@@ -217,9 +201,7 @@ impl Reassembler {
             t_ms,
             last_good: last_good as u32,
         });
-        self.idr_outstanding = true;
         self.idr_last_t = Some(t_ms);
-        self.idr_last_good_at_request = self.last_decoded;
     }
 }
 
