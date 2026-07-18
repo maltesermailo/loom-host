@@ -86,7 +86,16 @@ fn datagram_encode(input: &J) -> J {
 
 fn datagram_decode(input: &J) -> J {
     let bytes = hex::decode(input["hex"].as_str().unwrap()).unwrap();
-    match datagram::decode(&bytes) {
+
+    // Optional: the video stream_ids ≥ 2 negotiated for this session (§3.4
+    // multi-display, CONFIG key 6). Absent ⇒ the v1 default set {0 video, 1 audio}.
+    let extra: Vec<u16> = input
+        .get("extra_video_streams")
+        .and_then(J::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u16)).collect())
+        .unwrap_or_default();
+
+    match datagram::decode_with_streams(&bytes, &extra) {
         Ok(d) => {
             let h = d.header;
             json!({

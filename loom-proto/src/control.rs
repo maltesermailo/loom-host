@@ -55,13 +55,18 @@ pub const PAIR_RESULT: u64 = 0x53;
 pub fn known_keys(msg_type: u64) -> Option<&'static [i128]> {
     Some(match msg_type {
         HELLO => &[0, 1, 2, 3, 4, 5],
-        WELCOME => &[0, 1, 2],
-        CONFIG => &[0, 1, 2, 3, 4, 5],
+        // WELCOME key 3 = active feature bitmask (multi-display, §3.4).
+        WELCOME => &[0, 1, 2, 3],
+        // CONFIG key 6 = additional video streams (multi-display, §3.4).
+        CONFIG => &[0, 1, 2, 3, 4, 5, 6],
         CONFIG_ACK => &[0],
         START => &[],
-        INPUT => &[0],
-        IDR_REQUEST => &[0],
-        STATS => &[0, 1, 2, 3, 4, 5, 6],
+        // INPUT key 1 = target display stream_id (multi-display, §3.5).
+        INPUT => &[0, 1],
+        // IDR_REQUEST key 1 = target stream_id (multi-display, §3.6).
+        IDR_REQUEST => &[0, 1],
+        // STATS key 7 = the stream_id these counters describe (multi-display, §3.7).
+        STATS => &[0, 1, 2, 3, 4, 5, 6, 7],
         VIEWPORT => &[0],
         CLOCK_PING => &[0],
         CLOCK_PONG => &[0, 1, 2],

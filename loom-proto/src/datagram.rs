@@ -140,7 +140,8 @@ pub enum DropReason {
     FragIndexRange,
     /// `LAST_FRAGMENT` flag disagrees with `frag_index == frag_count - 1`.
     LastFragmentMismatch,
-    /// `stream_id` is neither 0 (video) nor 1 (audio).
+    /// `stream_id` is neither 0 (video) nor 1 (audio) nor a negotiated video
+    /// stream (§3.4 multi-display; see [`decode_with_streams`]).
     UnknownStream,
 }
 
@@ -168,9 +169,26 @@ pub struct DecodedDatagram {
     pub payload_len: usize,
 }
 
-/// Decode and validate a datagram header per §4. The validation order matches
-/// the normative reference model exactly (length checks precede magic, etc.).
+/// Decode and validate a datagram header per §4, accepting only the two
+/// always-present streams: 0 (primary-display video) and 1 (audio). Additional
+/// negotiated video streams (`stream_id ≥ 2`, §3.4 multi-display) are rejected as
+/// [`DropReason::UnknownStream`]; use [`decode_with_streams`] once they have been
+/// negotiated. The validation order matches the normative reference model exactly
+/// (length checks precede magic, etc.).
 pub fn decode(bytes: &[u8]) -> core::result::Result<DecodedDatagram, DropReason> {
+    decode_with_streams(bytes, &[])
+}
+
+/// Decode and validate a datagram header per §4, additionally accepting the
+/// `extra_video_streams` — the video `stream_id`s ≥ 2 negotiated for this session
+/// via CONFIG key 6 (§3.4 multi-display). A `stream_id` that is neither 0, 1, nor
+/// one of these is dropped as [`DropReason::UnknownStream`], exactly as §4
+/// requires for an un-negotiated stream. All other validation is identical to
+/// [`decode`].
+pub fn decode_with_streams(
+    bytes: &[u8],
+    extra_video_streams: &[u16],
+) -> core::result::Result<DecodedDatagram, DropReason> {
     if bytes.len() < HEADER_LEN {
         return Err(DropReason::TooShort);
     }
@@ -196,7 +214,7 @@ pub fn decode(bytes: &[u8]) -> core::result::Result<DecodedDatagram, DropReason>
     if last != (frag_index == frag_count - 1) {
         return Err(DropReason::LastFragmentMismatch);
     }
-    if stream_id != 0 && stream_id != 1 {
+    if stream_id != 0 && stream_id != 1 && !extra_video_streams.contains(&stream_id) {
         return Err(DropReason::UnknownStream);
     }
 
@@ -320,6 +338,23 @@ mod tests {
         for (h, want) in cases {
             assert_eq!(decode(&hex::decode(h).unwrap()), Err(want), "case {h}");
         }
+    }
+
+    #[test]
+    fn decode_with_streams_gates_negotiated_video() {
+        // stream_id 2 is a valid video display only once negotiated (§3.4).
+        let dg = DatagramHeader::new(true, 2, 3, 0, 1).encode(&[0xDD; 16]);
+        // Default decode() keeps the v1 {0,1} set → dropped.
+        assert_eq!(decode(&dg), Err(DropReason::UnknownStream));
+        // Un-negotiated even with a different extra stream → still dropped.
+        assert_eq!(decode_with_streams(&dg, &[3]), Err(DropReason::UnknownStream));
+        // Negotiated → decodes, carrying stream_id 2.
+        let d = decode_with_streams(&dg, &[2, 3]).expect("stream 2 negotiated");
+        assert_eq!(d.header.stream_id, 2);
+        assert!(d.header.keyframe && d.header.last_fragment);
+        // Streams 0 and 1 stay valid regardless of the negotiated set.
+        let audio = DatagramHeader::new(false, 1, 0, 0, 1).encode(&[]);
+        assert!(decode_with_streams(&audio, &[2]).is_ok());
     }
 
     #[test]
