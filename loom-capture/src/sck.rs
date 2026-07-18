@@ -309,9 +309,9 @@ fn pick_display(target: Option<u32>) -> Result<Retained<SCDisplay>, CaptureError
     let list = unsafe { content.displays() };
 
     match target {
-        None => list
-            .firstObject()
-            .ok_or_else(|| CaptureError::ScreenCaptureKit("no displays available to capture".into())),
+        None => list.firstObject().ok_or_else(|| {
+            CaptureError::ScreenCaptureKit("no displays available to capture".into())
+        }),
         Some(id) => list
             .iter()
             .find(|d| unsafe { d.displayID() } == id)

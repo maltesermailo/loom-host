@@ -90,7 +90,8 @@ fn start(
     height: u32,
 ) -> Result<loom_capture::ScreenCapture, loom_capture::CaptureError> {
     eprintln!("capture-dump: requesting {width}x{height} via ScreenCaptureKit");
-    loom_capture::ScreenCapture::start(width, height, 72)
+    // None = main display; this aid predates multi-display target selection.
+    loom_capture::ScreenCapture::start(None, width, height, 72)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -50,12 +50,16 @@ fn spawn_host(drop_percent: u32, encoder: loomd::media::EncoderKind) -> std::net
         name: "rec-host".into(),
         // Small frames keep IDRs to a few fragments, so a forced recovery IDR is
         // rarely re-dropped at 1% — the mechanism, not luck, is what's measured.
-        params: MediaParams {
-            width: 320,
-            height: 240,
-            ..MediaParams::default()
-        },
-        source: loomd::media::CaptureSource::Synthetic,
+        streams: vec![conn::StreamSpec {
+            stream_id: 0,
+            params: MediaParams {
+                width: 320,
+                height: 240,
+                ..MediaParams::default()
+            },
+            source: loomd::media::CaptureSource::Synthetic,
+            display: None,
+        }],
         encoder,
         drop_percent,
     };

@@ -92,7 +92,11 @@ fn datagram_decode(input: &J) -> J {
     let extra: Vec<u16> = input
         .get("extra_video_streams")
         .and_then(J::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u16)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u16))
+                .collect()
+        })
         .unwrap_or_default();
 
     match datagram::decode_with_streams(&bytes, &extra) {

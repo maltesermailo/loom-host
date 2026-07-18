@@ -34,12 +34,16 @@ fn spawn_host() -> SocketAddr {
         name: "test-host".into(),
         // Small frames keep these handshake tests light — they reach STREAMING,
         // which now spawns the real encoder/media thread.
-        params: MediaParams {
-            width: 320,
-            height: 240,
-            ..MediaParams::default()
-        },
-        source: loomd::media::CaptureSource::Synthetic,
+        streams: vec![conn::StreamSpec {
+            stream_id: 0,
+            params: MediaParams {
+                width: 320,
+                height: 240,
+                ..MediaParams::default()
+            },
+            source: loomd::media::CaptureSource::Synthetic,
+            display: None,
+        }],
         encoder: loomd::media::EncoderKind::X265,
         drop_percent: 0,
     };

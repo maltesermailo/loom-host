@@ -347,7 +347,10 @@ mod tests {
         // Default decode() keeps the v1 {0,1} set → dropped.
         assert_eq!(decode(&dg), Err(DropReason::UnknownStream));
         // Un-negotiated even with a different extra stream → still dropped.
-        assert_eq!(decode_with_streams(&dg, &[3]), Err(DropReason::UnknownStream));
+        assert_eq!(
+            decode_with_streams(&dg, &[3]),
+            Err(DropReason::UnknownStream)
+        );
         // Negotiated → decodes, carrying stream_id 2.
         let d = decode_with_streams(&dg, &[2, 3]).expect("stream 2 negotiated");
         assert_eq!(d.header.stream_id, 2);

@@ -20,21 +20,55 @@ use loom_proto::control::{self, Decoded};
 use loom_proto::errors;
 
 use crate::media::{self, MediaHandle};
-use crate::session::{HostSession, MediaParams, Output, State};
+use crate::session::{HostSession, MediaParams, Output, State, StreamConfig};
+
+/// One video stream the host serves: its wire `stream_id`, media parameters, the
+/// capture backend, and (for SCK) which display feeds it. `streams[0]` is the
+/// primary (stream_id 0); any others are the multi-display extras (§M6.2).
+#[derive(Clone)]
+pub struct StreamSpec {
+    /// Datagram stream_id: 0 for the primary, ≥ 2 for extra displays.
+    pub stream_id: u16,
+    /// This stream's media parameters (its own native size/refresh/bitrate).
+    pub params: MediaParams,
+    /// Frame source the media thread encodes (`--source`).
+    pub source: media::CaptureSource,
+    /// `CGDirectDisplayID` to capture (SCK only); `None` = main / source default.
+    pub display: Option<u32>,
+}
 
 /// Immutable per-daemon settings handed to each connection.
 #[derive(Clone)]
 pub struct HostCfg {
     /// Host display name (WELCOME key 1).
     pub name: String,
-    /// Media parameters advertised in CONFIG.
-    pub params: MediaParams,
-    /// Frame source the media thread encodes (`--source`).
-    pub source: media::CaptureSource,
+    /// The video streams to serve. Element 0 is the primary (stream_id 0);
+    /// elements ≥ 1 are the multi-display extras, offered only when the client
+    /// negotiates the feature (§3.4).
+    pub streams: Vec<StreamSpec>,
     /// HEVC encoder backend (`--encoder`).
     pub encoder: media::EncoderKind,
     /// Dev datagram-loss injection percentage (`--drop-percent`; 0 = none).
     pub drop_percent: u32,
+}
+
+impl HostCfg {
+    /// The primary stream (stream_id 0) — always present.
+    fn primary(&self) -> &StreamSpec {
+        &self.streams[0]
+    }
+
+    /// The protocol view of the extra streams, for the session state machine
+    /// (which never sees the capture-side `source`/`display`).
+    fn extra_stream_configs(&self) -> Vec<StreamConfig> {
+        self.streams[1..]
+            .iter()
+            .map(|s| StreamConfig {
+                stream_id: s.stream_id,
+                params: s.params,
+            })
+            .collect()
+    }
 }
 
 /// Accept and drive one inbound connection to completion. Never panics; logs
@@ -68,10 +102,12 @@ pub async fn handle(incoming: quinn::Incoming, slot: Arc<Semaphore>, cfg: HostCf
 /// Drive the session state machine over the accepted control stream, owning the
 /// media thread's lifetime so it is always joined on exit.
 async fn run_session(connection: &Connection, cfg: &HostCfg) -> std::io::Result<()> {
-    let mut media: Option<MediaHandle> = None;
+    // One media pipeline per active video stream (just the primary unless
+    // multi-display is negotiated). All are joined on exit.
+    let mut media: Vec<MediaHandle> = Vec::new();
     let result = session_loop(connection, cfg, &mut media).await;
-    if let Some(m) = media.take() {
-        // The connection is closed by now, so the media thread stops promptly.
+    for m in media.drain(..) {
+        // The connection is closed by now, so the media threads stop promptly.
         m.join();
     }
     result
@@ -80,7 +116,7 @@ async fn run_session(connection: &Connection, cfg: &HostCfg) -> std::io::Result<
 async fn session_loop(
     connection: &Connection,
     cfg: &HostCfg,
-    media: &mut Option<MediaHandle>,
+    media: &mut Vec<MediaHandle>,
 ) -> std::io::Result<()> {
     // The client opens exactly one bidirectional stream: the control stream.
     let (mut send, mut recv) = connection
@@ -88,7 +124,12 @@ async fn session_loop(
         .await
         .map_err(|e| std::io::Error::other(format!("accept_bi: {e}")))?;
 
-    let mut session = HostSession::new(cfg.name.clone(), gen_session_id(), cfg.params);
+    let mut session = HostSession::new(
+        cfg.name.clone(),
+        gen_session_id(),
+        cfg.primary().params,
+        cfg.extra_stream_configs(),
+    );
 
     loop {
         match read_frame(&mut recv).await? {
@@ -133,7 +174,7 @@ async fn drive(
     send: &mut SendStream,
     connection: &Connection,
     cfg: &HostCfg,
-    media: &mut Option<MediaHandle>,
+    media: &mut Vec<MediaHandle>,
     outputs: Vec<Output>,
 ) -> std::io::Result<bool> {
     for out in outputs {
@@ -141,26 +182,41 @@ async fn drive(
             Output::Send { msg_type, body } => {
                 send_frame(send, msg_type, &body).await?;
             }
-            Output::StartMedia => {
-                // Spawn the media pipeline (synthetic or portal capture) on its
-                // own thread; §5 encode + §4 fragmentation are source-agnostic.
-                *media = Some(media::spawn(
-                    connection.clone(),
-                    cfg.params,
-                    cfg.source,
-                    cfg.encoder,
-                    cfg.drop_percent,
-                ));
+            Output::StartMedia { multi } => {
+                // One pipeline per active stream: just the primary unless
+                // multi-display was negotiated (§3.4). §5 encode + §4
+                // fragmentation are source- and stream-agnostic.
+                let specs = if multi {
+                    &cfg.streams[..]
+                } else {
+                    &cfg.streams[..1]
+                };
+                for spec in specs {
+                    media.push(media::spawn(
+                        connection.clone(),
+                        spec.stream_id,
+                        spec.params,
+                        spec.source,
+                        spec.display,
+                        cfg.encoder,
+                        cfg.drop_percent,
+                    ));
+                }
+                tracing::info!(target: "loom::media", event = "fanout_start",
+                    streams = specs.len(), multi);
             }
-            Output::RequestIdr => {
-                if let Some(m) = media.as_ref() {
+            Output::RequestIdr { stream_id } => {
+                // Route the IDR to the encoder for that stream (§3.6); streams
+                // recover independently.
+                if let Some(m) = media.iter().find(|m| m.stream_id() == stream_id) {
                     m.request_idr();
                 }
             }
             Output::Reconfigure { params } => {
                 // A VIEWPORT-driven resolution change was ACKed (§8): switch the
-                // running media thread to the new size on its next frame.
-                if let Some(m) = media.as_ref() {
+                // primary stream to the new size on its next frame. (VIEWPORT is
+                // primary-only in M6.2; per-window viewport is M6.4.)
+                if let Some(m) = media.iter().find(|m| m.stream_id() == 0) {
                     m.reconfigure(params);
                 }
             }
@@ -181,7 +237,7 @@ async fn drive(
             }
             Output::Stats(r) => {
                 tracing::info!(
-                    target: "loom::stats", event = "stats",
+                    target: "loom::stats", event = "stats", stream_id = r.stream_id,
                     frames_received = r.frames_received, frames_dropped = r.frames_dropped,
                     datagrams = r.datagrams, jitter_ms = r.jitter_ms, decode_us = r.decode_us,
                     rtt_us = r.rtt_us, e2e_us = r.e2e_us.unwrap_or(-1)

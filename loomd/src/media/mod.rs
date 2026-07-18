@@ -124,12 +124,19 @@ fn open_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Result<VideoEncoder, E
 
 /// Handle to a running media thread. Dropping it detaches; [`Self::join`] waits.
 pub struct MediaHandle {
+    /// The video stream_id this pipeline sends on (0 = primary, ≥ 2 = extra).
+    stream_id: u16,
     idr_tx: Sender<()>,
     reconfig_tx: Sender<MediaParams>,
     join: Option<JoinHandle<()>>,
 }
 
 impl MediaHandle {
+    /// The video stream_id this pipeline drives (§3.6/§4 routing).
+    pub fn stream_id(&self) -> u16 {
+        self.stream_id
+    }
+
     /// Ask the encoder to emit an IDR on its next frame (§3.6).
     pub fn request_idr(&self) {
         let _ = self.idr_tx.send(());
@@ -150,12 +157,18 @@ impl MediaHandle {
     }
 }
 
-/// Spawn the media thread for a session. `source` selects the frame source;
-/// `drop_percent` injects deterministic datagram loss for testing (0 = none).
+/// Spawn a media thread for one video stream. `stream_id` is the datagram stream
+/// this pipeline sends on (0 = primary, ≥ 2 = an extra display); `display` is the
+/// `CGDirectDisplayID` to capture (SCK only; `None` = main / source default);
+/// `source` selects the frame source; `drop_percent` injects deterministic
+/// datagram loss for testing (0 = none).
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     connection: Connection,
+    stream_id: u16,
     params: MediaParams,
     source: CaptureSource,
+    display: Option<u32>,
     encoder: EncoderKind,
     drop_percent: u32,
 ) -> MediaHandle {
@@ -164,8 +177,10 @@ pub fn spawn(
     let join = std::thread::spawn(move || {
         run(
             connection,
+            stream_id,
             params,
             source,
+            display,
             encoder,
             drop_percent,
             idr_rx,
@@ -173,6 +188,7 @@ pub fn spawn(
         )
     });
     MediaHandle {
+        stream_id,
         idr_tx,
         reconfig_tx,
         join: Some(join),
@@ -227,10 +243,13 @@ pub fn dump_hevc(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     connection: Connection,
+    stream_id: u16,
     params: MediaParams,
     source_kind: CaptureSource,
+    display: Option<u32>,
     encoder_kind: EncoderKind,
     drop_percent: u32,
     idr_rx: Receiver<()>,
@@ -252,7 +271,7 @@ fn run(
         }
     };
 
-    let mut source = match open_source(source_kind, &params) {
+    let mut source = match open_source(source_kind, &params, display) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(target: "loom::media", error = %e, "capture open failed");
@@ -268,6 +287,7 @@ fn run(
     // thread is synchronous, no await points).
     let span = tracing::info_span!(
         "media_session",
+        stream_id,
         width = w,
         height = h,
         refresh = params.refresh
@@ -286,7 +306,7 @@ fn run(
         // force the next frame to an IDR with the new parameter sets. frame_seq
         // is intentionally NOT reset — the client's reassembly counter continues.
         let reconfigured = match reconfig_rx.try_iter().last() {
-            Some(new_params) => match reopen(source_kind, encoder_kind, &new_params) {
+            Some(new_params) => match reopen(source_kind, encoder_kind, &new_params, display) {
                 Ok((new_source, new_encoder)) => {
                     source = new_source;
                     encoder = new_encoder;
@@ -369,7 +389,7 @@ fn run(
                 body.extend_from_slice(&capture_ts.to_be_bytes());
                 body.extend_from_slice(&au.data);
 
-                let frags = datagram::fragment(0, frame_seq, au.keyframe, &body);
+                let frags = datagram::fragment(stream_id, frame_seq, au.keyframe, &body);
                 let total = frags.len();
                 let mut sent = 0usize;
                 for dg in frags {
@@ -406,6 +426,7 @@ fn reopen(
     source_kind: CaptureSource,
     encoder_kind: EncoderKind,
     params: &MediaParams,
+    display: Option<u32>,
 ) -> Result<(Source, VideoEncoder), Box<dyn std::error::Error>> {
     let cfg = constraints::encoder_config(
         params.width as u32,
@@ -414,7 +435,7 @@ fn reopen(
         params.bitrate_kbps as u32,
     );
     let encoder = open_encoder(encoder_kind, cfg)?;
-    let source = open_source(source_kind, params)?;
+    let source = open_source(source_kind, params, display)?;
 
     Ok((source, encoder))
 }
@@ -425,6 +446,7 @@ fn reopen(
 fn open_source(
     kind: CaptureSource,
     params: &MediaParams,
+    display: Option<u32>,
 ) -> Result<Source, Box<dyn std::error::Error>> {
     let (w, h) = (params.width as u32, params.height as u32);
 
@@ -432,6 +454,8 @@ fn open_source(
         CaptureSource::Synthetic => Ok(Source::Synthetic(TestPattern::new(w as usize, h as usize))),
         #[cfg(target_os = "linux")]
         CaptureSource::Portal => {
+            // The portal picks the monitor via its own dialog; `display` (a macOS
+            // CGDirectDisplayID) does not apply on Linux.
             let capture = PortalCapture::start(w, h, params.refresh as u32)?;
             Ok(Source::Portal {
                 capture,
@@ -441,9 +465,9 @@ fn open_source(
         }
         #[cfg(target_os = "macos")]
         CaptureSource::Sck => {
-            // Single-stream `--source sck` captures the main display (target None);
-            // the multi-display fan-out (M6.2) passes an explicit display id.
-            let capture = ScreenCapture::start(None, w, h, params.refresh as u32)?;
+            // `display` names the target CGDirectDisplayID for this stream; None
+            // captures the main display (single-stream `--source sck`).
+            let capture = ScreenCapture::start(display, w, h, params.refresh as u32)?;
             Ok(Source::Sck {
                 capture,
                 frame: I420Buffer::new(w, h),

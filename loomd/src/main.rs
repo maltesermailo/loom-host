@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use clap::Parser;
 
-use loomd::conn::HostCfg;
+use loomd::conn::{HostCfg, StreamSpec};
 use loomd::media::{CaptureSource, EncoderKind};
 use loomd::session::MediaParams;
 use loomd::{endpoint, BoxErr};
@@ -38,6 +38,15 @@ struct Args {
     /// macOS desktop capture (M2.1), which scales the display to `--width/--height`.
     #[arg(long, value_enum, default_value_t = CaptureSource::Synthetic)]
     source: CaptureSource,
+
+    /// Which displays to stream (multi-display, M6.2). `main` (default) streams a
+    /// single display, exactly as before. `all` streams every connected display,
+    /// each as its own video stream; a comma-separated list of CGDirectDisplayIDs
+    /// (see `cargo run -p loom-capture --example list-displays`) streams exactly
+    /// those. `all`/list require `--source sck`; the extra streams are sent only
+    /// to a client that negotiates multi-display (§3.4).
+    #[arg(long, default_value = "main")]
+    displays: String,
 
     /// HEVC encoder. `x265` is software (default, all platforms); `nvenc` is
     /// hardware and only exists in a build compiled with `--features nvenc`;
@@ -118,19 +127,103 @@ async fn main() -> Result<(), BoxErr> {
         loom_proto::PROTOCOL_VERSION
     );
 
-    let params = MediaParams {
-        width: args.width as u64,
-        height: args.height as u64,
-        ..MediaParams::default()
+    let streams = match resolve_streams(&args) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("loomd: {e}");
+            std::process::exit(2);
+        }
     };
+    eprintln!(
+        "loomd: serving {} video stream(s){}",
+        streams.len(),
+        if streams.len() > 1 {
+            " — multi-display, offered to clients that negotiate it"
+        } else {
+            ""
+        }
+    );
 
     let cfg = HostCfg {
         name: args.name,
-        params,
-        source: args.source,
+        streams,
         encoder: args.encoder,
         drop_percent: args.drop_percent,
     };
     endpoint::accept_loop(endpoint, cfg).await;
     Ok(())
+}
+
+/// Resolve `--displays` into the video streams to serve. `main` is a single
+/// stream (today's behavior); `all` / an id list fan out one stream per display
+/// (macOS/SCK only in M6.2). Streams get stream_ids 0, 2, 3, … (1 is audio), each
+/// at its display's native resolution.
+fn resolve_streams(args: &Args) -> Result<Vec<StreamSpec>, String> {
+    let base = MediaParams {
+        width: args.width as u64,
+        height: args.height as u64,
+        ..MediaParams::default()
+    };
+
+    if args.displays == "main" {
+        return Ok(vec![StreamSpec {
+            stream_id: 0,
+            params: base,
+            source: args.source,
+            display: None,
+        }]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if args.source != CaptureSource::Sck {
+            return Err(format!(
+                "--displays {} requires --source sck (multi-display captures physical displays)",
+                args.displays
+            ));
+        }
+
+        let available = loom_capture::displays().map_err(|e| e.to_string())?;
+        let selected: Vec<loom_capture::DisplayInfo> = if args.displays == "all" {
+            available
+        } else {
+            let mut out = Vec::new();
+            for tok in args.displays.split(',') {
+                let id: u32 = tok.trim().parse().map_err(|_| {
+                    format!("--displays: '{tok}' is not 'main', 'all', or a numeric display id")
+                })?;
+                let d = available.iter().find(|d| d.id == id).copied().ok_or_else(|| {
+                    format!("--displays: display id {id} is not connected (see the list-displays example)")
+                })?;
+                out.push(d);
+            }
+            out
+        };
+
+        if selected.is_empty() {
+            return Err("--displays: no displays available to stream".into());
+        }
+
+        // stream_id 0 for the first display, then 2, 3, … (1 is audio).
+        let streams = selected
+            .iter()
+            .enumerate()
+            .map(|(i, d)| StreamSpec {
+                stream_id: if i == 0 { 0 } else { (i + 1) as u16 },
+                params: MediaParams {
+                    width: d.width as u64,
+                    height: d.height as u64,
+                    ..base
+                },
+                source: CaptureSource::Sck,
+                display: Some(d.id),
+            })
+            .collect();
+        Ok(streams)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("--displays: only 'main' is supported on this platform (M6.2 multi-display is macOS/SCK)".into())
+    }
 }

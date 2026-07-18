@@ -69,6 +69,22 @@ impl Default for MediaParams {
     }
 }
 
+/// HELLO key 5 feature bit 1: the client can fan in concurrent video streams
+/// (PROTOCOL §3.4 multi-display). Bit 0 (audio) is orthogonal and unused in v1.
+const FEATURE_MULTI_DISPLAY: u64 = 0b10;
+
+/// One additional video stream the host offers beyond the primary (stream_id 0)
+/// — the protocol view of a display, carried in CONFIG key 6 (§3.4). The capture
+/// side (which physical/virtual display feeds it) is a host concern kept out of
+/// this sans-io state machine; see `conn::StreamSpec`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StreamConfig {
+    /// Datagram stream_id (≥ 2, unique) this display streams on.
+    pub stream_id: u16,
+    /// Per-stream media parameters (its own native size, refresh, bitrate).
+    pub params: MediaParams,
+}
+
 /// An instruction from the state machine to its async driver, in order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Output {
@@ -80,10 +96,19 @@ pub enum Output {
         body: Vec<(Value, Value)>,
     },
     /// START has been emitted; media may begin. Wired to the encoder in M1.2.
-    StartMedia,
-    /// The client asked for a fresh IDR (§3.6). The driver forwards this to the
-    /// running encoder, which codes the next frame as an IDR.
-    RequestIdr,
+    /// `multi` is true when multi-display was negotiated (§3.4): the driver spawns
+    /// one pipeline per configured stream instead of only the primary.
+    StartMedia {
+        /// Whether the extra streams (CONFIG key 6) are active this session.
+        multi: bool,
+    },
+    /// The client asked for a fresh IDR on a video stream (§3.6). The driver
+    /// forwards this to that stream's encoder, which codes the next frame as an
+    /// IDR. `stream_id` is IDR_REQUEST key 1 (default 0 = primary).
+    RequestIdr {
+        /// The video stream to refresh (0 = primary display).
+        stream_id: u16,
+    },
     /// A VIEWPORT-driven resolution change was ACKed (§8): reconfigure the
     /// running media thread to `params`. The next encoded frame is an IDR with
     /// the new parameter sets; `frame_seq` continues.
@@ -125,6 +150,9 @@ pub struct StatsReport {
     pub rtt_us: i64,
     /// Mean end-to-end video latency, µs (omitted before the first clock sample).
     pub e2e_us: Option<i64>,
+    /// The video stream_id these counters describe (§3.7 key 7, default 0). With
+    /// multiple streams the client sends one STATS per stream.
+    pub stream_id: u16,
 }
 
 impl StatsReport {
@@ -137,6 +165,7 @@ impl StatsReport {
             decode_us: int_key(body, 4).unwrap_or(0) as i64,
             rtt_us: int_key(body, 5).unwrap_or(0) as i64,
             e2e_us: int_key(body, 6).map(|v| v as i64),
+            stream_id: int_key(body, 7).unwrap_or(0) as u16,
         }
     }
 }
@@ -170,11 +199,26 @@ pub struct HostSession {
     /// still awaiting (§8). While set, media continues at the old resolution and
     /// further VIEWPORT requests are ignored.
     pending_generation: Option<u64>,
+    /// Additional displays the host is configured to serve beyond the primary
+    /// (stream_id 0). Advertised in CONFIG key 6 only once [`Self::multi_active`].
+    extra_streams: Vec<StreamConfig>,
+    /// Whether multi-display was negotiated: the client offered HELLO key 5 bit 1
+    /// **and** the host has extra streams to serve. Decided at HELLO and fixed for
+    /// the session. When false the host is single-stream, bit-exact with a peer
+    /// that predates the feature.
+    multi_active: bool,
 }
 
 impl HostSession {
     /// A fresh session awaiting HELLO. `session_id` is UI/log-only (§3.4).
-    pub fn new(host_name: impl Into<String>, session_id: [u8; 16], params: MediaParams) -> Self {
+    /// `extra_streams` are the additional displays this host would serve if the
+    /// client negotiates multi-display; empty for a single-display host.
+    pub fn new(
+        host_name: impl Into<String>,
+        session_id: [u8; 16],
+        params: MediaParams,
+        extra_streams: Vec<StreamConfig>,
+    ) -> Self {
         Self {
             state: State::WaitHello,
             host_name: host_name.into(),
@@ -184,6 +228,8 @@ impl HostSession {
             client_max_width: params.width,
             client_max_height: params.height,
             pending_generation: None,
+            extra_streams,
+            multi_active: false,
         }
     }
 
@@ -226,7 +272,11 @@ impl HostSession {
     /// Streaming-phase client→host messages (§3.3).
     fn on_streaming(&mut self, msg_type: u64, body: &[(Value, Value)]) -> Vec<Output> {
         match msg_type {
-            control::IDR_REQUEST => vec![Output::RequestIdr],
+            control::IDR_REQUEST => {
+                // Key 1 (default 0) selects the video stream to refresh (§3.6).
+                let stream_id = int_key(body, 1).unwrap_or(0) as u16;
+                vec![Output::RequestIdr { stream_id }]
+            }
             control::STATS => vec![Output::Stats(StatsReport::from_body(body))],
             control::VIEWPORT => self.on_viewport(body),
             // A CONFIG_ACK here closes the mid-session reconfiguration gate (§8).
@@ -311,6 +361,13 @@ impl HostSession {
             self.client_max_height = h as u64;
         }
 
+        // Key 5: feature bitmask. Multi-display activates only if the client can
+        // fan in concurrent streams *and* the host has extra displays to serve;
+        // otherwise the session stays single-stream (§3.4, §12).
+        let client_features = int_key(body, 5).unwrap_or(0) as u64;
+        let client_multi = client_features & FEATURE_MULTI_DISPLAY != 0;
+        self.multi_active = client_multi && !self.extra_streams.is_empty();
+
         self.generation = 1;
         self.state = State::WaitConfigAck;
         vec![
@@ -340,21 +397,29 @@ impl HostSession {
                 msg_type: control::START,
                 body: Vec::new(),
             },
-            Output::StartMedia,
+            Output::StartMedia {
+                multi: self.multi_active,
+            },
         ]
     }
 
     fn welcome_body(&self) -> Vec<(Value, Value)> {
-        vec![
+        let mut body = vec![
             (Value::Int(0), Value::Int(PROTOCOL_VERSION as i128)),
             (Value::Int(1), Value::Text(self.host_name.clone())),
             (Value::Int(2), Value::Bytes(self.session_id.to_vec())),
-        ]
+        ];
+        // Key 3: active feature bitmask (§3.4). Emitted only when a feature is
+        // active, so a single-display session's WELCOME is byte-identical to before.
+        if self.multi_active {
+            body.push((Value::Int(3), Value::Int(FEATURE_MULTI_DISPLAY as i128)));
+        }
+        body
     }
 
     fn config_body(&self) -> Vec<(Value, Value)> {
         let p = self.params;
-        vec![
+        let mut body = vec![
             (Value::Int(0), Value::Int(self.generation as i128)),
             (Value::Int(1), Value::Int(p.codec as i128)),
             (
@@ -367,7 +432,31 @@ impl HostSession {
             (Value::Int(3), Value::Int(p.refresh as i128)),
             (Value::Int(4), Value::Int(p.audio as i128)),
             (Value::Int(5), Value::Int(p.bitrate_kbps as i128)),
-        ]
+        ];
+        // Key 6: additional video streams (§3.4), present only when multi-display
+        // is active. Keys 1–5 above describe the primary stream (stream_id 0).
+        if self.multi_active {
+            let extras = self
+                .extra_streams
+                .iter()
+                .map(|s| {
+                    Value::Map(vec![
+                        (Value::Int(0), Value::Int(s.stream_id as i128)),
+                        (
+                            Value::Int(1),
+                            Value::Array(vec![
+                                Value::Int(s.params.width as i128),
+                                Value::Int(s.params.height as i128),
+                            ]),
+                        ),
+                        (Value::Int(2), Value::Int(s.params.refresh as i128)),
+                        (Value::Int(3), Value::Int(s.params.bitrate_kbps as i128)),
+                    ])
+                })
+                .collect();
+            body.push((Value::Int(6), Value::Array(extras)));
+        }
+        body
     }
 
     /// Emit ERROR + close for a framing/ordering violation (§10 0x04).
@@ -455,7 +544,38 @@ mod tests {
     }
 
     fn new_session() -> HostSession {
-        HostSession::new("test-host", [0u8; 16], MediaParams::default())
+        HostSession::new("test-host", [0u8; 16], MediaParams::default(), Vec::new())
+    }
+
+    /// A session configured with one extra display (stream_id 2, 1920×1080) — the
+    /// host side of the owner's two-monitor setup.
+    fn multi_new_session() -> HostSession {
+        let extra = StreamConfig {
+            stream_id: 2,
+            params: MediaParams {
+                width: 1920,
+                height: 1080,
+                ..MediaParams::default()
+            },
+        };
+        HostSession::new("test-host", [0u8; 16], MediaParams::default(), vec![extra])
+    }
+
+    /// HELLO advertising multi-display (key 5 bit 1) plus a decode max.
+    fn hello_multi() -> Decoded {
+        Decoded::Message {
+            msg_type: control::HELLO,
+            body: vec![
+                (Value::Int(0), Value::Int(1)),
+                (Value::Int(1), Value::Text("Quest 3".into())),
+                (Value::Int(2), Value::Array(vec![Value::Int(1)])),
+                (
+                    Value::Int(3),
+                    Value::Array(vec![Value::Int(2560), Value::Int(1440)]),
+                ),
+                (Value::Int(5), Value::Int(0b11)), // audio | multi-display
+            ],
+        }
     }
 
     fn sent_types(out: &[Output]) -> Vec<u64> {
@@ -476,8 +596,99 @@ mod tests {
 
         let out = s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
         assert_eq!(sent_types(&out), vec![control::START]);
-        assert!(out.contains(&Output::StartMedia));
+        assert!(out.contains(&Output::StartMedia { multi: false }));
         assert_eq!(s.state(), State::Streaming);
+    }
+
+    #[test]
+    fn multi_display_negotiated_advertises_config_key6() {
+        let mut s = multi_new_session();
+        let out = s.on_frame(hello_multi());
+        assert_eq!(sent_types(&out), vec![control::WELCOME, control::CONFIG]);
+
+        // WELCOME key 3 = active features (bit 1 = multi-display).
+        let welcome = out
+            .iter()
+            .find_map(|o| match o {
+                Output::Send { msg_type, body } if *msg_type == control::WELCOME => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(int_key(welcome, 3), Some(0b10));
+
+        // CONFIG key 6 = [{0: 2, 1: [1920,1080], 2: 72, 3: 60000}].
+        let config = out
+            .iter()
+            .find_map(|o| match o {
+                Output::Send { msg_type, body } if *msg_type == control::CONFIG => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        match config
+            .iter()
+            .find(|(k, _)| *k == Value::Int(6))
+            .map(|(_, v)| v)
+        {
+            Some(Value::Array(streams)) => {
+                assert_eq!(streams.len(), 1);
+                match &streams[0] {
+                    Value::Map(desc) => {
+                        assert_eq!(int_key(desc, 0), Some(2)); // stream_id
+                        assert_eq!(pair_elem(desc, 1, 0), Some(1920));
+                        assert_eq!(pair_elem(desc, 1, 1), Some(1080));
+                    }
+                    other => panic!("expected a stream descriptor map, got {other:?}"),
+                }
+            }
+            other => panic!("expected CONFIG key 6 array, got {other:?}"),
+        }
+
+        let out = s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        assert!(out.contains(&Output::StartMedia { multi: true }));
+    }
+
+    #[test]
+    fn multi_display_inactive_when_client_lacks_feature() {
+        // Host has an extra stream, but a plain HELLO (no key 5 bit 1) → single.
+        let mut s = multi_new_session();
+        let out = s.on_frame(hello(1, vec![1]));
+        let config = out
+            .iter()
+            .find_map(|o| match o {
+                Output::Send { msg_type, body } if *msg_type == control::CONFIG => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert!(config.iter().all(|(k, _)| *k != Value::Int(6)));
+        let out = s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        assert!(out.contains(&Output::StartMedia { multi: false }));
+    }
+
+    #[test]
+    fn multi_display_inactive_when_host_single() {
+        // Client offers multi-display, but a single-display host has no extras.
+        let mut s = new_session();
+        let out = s.on_frame(hello_multi());
+        let welcome = out
+            .iter()
+            .find_map(|o| match o {
+                Output::Send { msg_type, body } if *msg_type == control::WELCOME => Some(body),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(int_key(welcome, 3), None); // no feature echo
+    }
+
+    #[test]
+    fn idr_request_targets_named_stream() {
+        let mut s = new_session();
+        s.on_frame(hello(1, vec![1]));
+        s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        let out = s.on_frame(msg(
+            control::IDR_REQUEST,
+            vec![(0, Value::Int(0)), (1, Value::Int(2))],
+        ));
+        assert_eq!(out, vec![Output::RequestIdr { stream_id: 2 }]);
     }
 
     #[test]
@@ -541,7 +752,7 @@ mod tests {
         s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
         assert_eq!(s.state(), State::Streaming);
         let out = s.on_frame(msg(control::IDR_REQUEST, vec![(0, Value::Int(0))]));
-        assert_eq!(out, vec![Output::RequestIdr]);
+        assert_eq!(out, vec![Output::RequestIdr { stream_id: 0 }]);
         assert_eq!(s.state(), State::Streaming);
     }
 
