@@ -157,6 +157,13 @@ async fn drive(
                     m.request_idr();
                 }
             }
+            Output::Reconfigure { params } => {
+                // A VIEWPORT-driven resolution change was ACKed (§8): switch the
+                // running media thread to the new size on its next frame.
+                if let Some(m) = media.as_ref() {
+                    m.reconfigure(params);
+                }
+            }
             Output::ClockPong { t0 } => {
                 // Stamp host receive/send times from the shared clock (§7). On
                 // loopback the receive→send gap is sub-µs, so t1 == t2 is fine.

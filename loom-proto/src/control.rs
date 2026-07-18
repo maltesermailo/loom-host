@@ -30,6 +30,8 @@ pub const INPUT: u64 = 0x10;
 pub const IDR_REQUEST: u64 = 0x20;
 /// STATS — client → host, streaming.
 pub const STATS: u64 = 0x21;
+/// VIEWPORT — client → host, streaming (best-effort resolution request, §3.10).
+pub const VIEWPORT: u64 = 0x22;
 /// CLOCK_PING — client → host, any.
 pub const CLOCK_PING: u64 = 0x30;
 /// CLOCK_PONG — host → client, any.
@@ -60,6 +62,7 @@ pub fn known_keys(msg_type: u64) -> Option<&'static [i128]> {
         INPUT => &[0],
         IDR_REQUEST => &[0],
         STATS => &[0, 1, 2, 3, 4, 5, 6],
+        VIEWPORT => &[0],
         CLOCK_PING => &[0],
         CLOCK_PONG => &[0, 1, 2],
         ERROR => &[0, 1],

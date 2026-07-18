@@ -125,6 +125,7 @@ fn open_encoder(kind: EncoderKind, cfg: EncoderConfig) -> Result<VideoEncoder, E
 /// Handle to a running media thread. Dropping it detaches; [`Self::join`] waits.
 pub struct MediaHandle {
     idr_tx: Sender<()>,
+    reconfig_tx: Sender<MediaParams>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -132,6 +133,13 @@ impl MediaHandle {
     /// Ask the encoder to emit an IDR on its next frame (§3.6).
     pub fn request_idr(&self) {
         let _ = self.idr_tx.send(());
+    }
+
+    /// Switch the running thread to a new resolution (§8): it re-opens the
+    /// capture + encoder and codes the next frame as an IDR with the new
+    /// parameter sets. `frame_seq` continues across the switch.
+    pub fn reconfigure(&self, params: MediaParams) {
+        let _ = self.reconfig_tx.send(params);
     }
 
     /// Block until the media thread has stopped.
@@ -152,10 +160,21 @@ pub fn spawn(
     drop_percent: u32,
 ) -> MediaHandle {
     let (idr_tx, idr_rx) = mpsc::channel();
-    let join =
-        std::thread::spawn(move || run(connection, params, source, encoder, drop_percent, idr_rx));
+    let (reconfig_tx, reconfig_rx) = mpsc::channel();
+    let join = std::thread::spawn(move || {
+        run(
+            connection,
+            params,
+            source,
+            encoder,
+            drop_percent,
+            idr_rx,
+            reconfig_rx,
+        )
+    });
     MediaHandle {
         idr_tx,
+        reconfig_tx,
         join: Some(join),
     }
 }
@@ -215,8 +234,10 @@ fn run(
     encoder_kind: EncoderKind,
     drop_percent: u32,
     idr_rx: Receiver<()>,
+    reconfig_rx: Receiver<MediaParams>,
 ) {
-    let (w, h) = (params.width as usize, params.height as usize);
+    let mut params = params;
+    let (mut w, mut h) = (params.width as usize, params.height as usize);
     let cfg = constraints::encoder_config(
         params.width as u32,
         params.height as u32,
@@ -259,8 +280,33 @@ fn run(
         if connection.close_reason().is_some() {
             break;
         }
-        // Coalesce any pending IDR requests into one forced IDR.
-        let force_idr = idr_rx.try_iter().count() > 0;
+
+        // Mid-session reconfiguration (§8): a VIEWPORT-driven resolution change.
+        // Coalesce to the newest requested size, re-open capture + encoder, and
+        // force the next frame to an IDR with the new parameter sets. frame_seq
+        // is intentionally NOT reset — the client's reassembly counter continues.
+        let reconfigured = match reconfig_rx.try_iter().last() {
+            Some(new_params) => match reopen(source_kind, encoder_kind, &new_params) {
+                Ok((new_source, new_encoder)) => {
+                    source = new_source;
+                    encoder = new_encoder;
+                    params = new_params;
+                    w = params.width as usize;
+                    h = params.height as usize;
+                    tracing::info!(target: "loom::media", event = "reconfigured", width = w, height = h);
+                    true
+                }
+                Err(e) => {
+                    tracing::error!(target: "loom::media", error = %e, "reconfigure failed");
+                    break;
+                }
+            },
+            None => false,
+        };
+
+        // Coalesce any pending IDR requests into one forced IDR; a reconfiguration
+        // likewise forces one (the new VPS/SPS/PPS must lead the new generation, §5.2).
+        let force_idr = reconfigured || idr_rx.try_iter().count() > 0;
 
         // Produce this tick's I420 frame. Portal capture is damage-driven, so
         // before its first frame we simply wait a tick; once it has delivered,
@@ -350,6 +396,27 @@ fn run(
         pace(&mut next, interval);
     }
     tracing::info!(target: "loom::media", event = "media_stop", frames = frame_seq);
+}
+
+/// Re-open the capture source and encoder at new [`MediaParams`] for a §8
+/// mid-session reconfiguration. Both are recreated together so the encode loop
+/// swaps to the new resolution atomically. The old source/encoder are dropped by
+/// the caller once this returns the new pair.
+fn reopen(
+    source_kind: CaptureSource,
+    encoder_kind: EncoderKind,
+    params: &MediaParams,
+) -> Result<(Source, VideoEncoder), Box<dyn std::error::Error>> {
+    let cfg = constraints::encoder_config(
+        params.width as u32,
+        params.height as u32,
+        params.refresh as u32,
+        params.bitrate_kbps as u32,
+    );
+    let encoder = open_encoder(encoder_kind, cfg)?;
+    let source = open_source(source_kind, params)?;
+
+    Ok((source, encoder))
 }
 
 /// Resolve the configured [`CaptureSource`] into a live [`Source`]. Portal

@@ -26,10 +26,20 @@ use loom_proto::{errors, PROTOCOL_VERSION};
 /// The one codec `loomd` can encode in v1 (PROTOCOL.md §3.4 key 2: 1 = HEVC).
 const CODEC_HEVC: u64 = 1;
 
+/// Host encode/capture ceiling for a VIEWPORT request (§3.10). A requested size
+/// is clamped to this and to the client's HELLO max before reconfiguring. 4K is
+/// generous headroom above the v1 quality bar; the client's own decode max is
+/// usually the tighter bound.
+const HOST_MAX_WIDTH: u64 = 3840;
+const HOST_MAX_HEIGHT: u64 = 2160;
+/// Floor for a clamped VIEWPORT dimension, so a degenerate request can't ask for
+/// a 0- or few-pixel stream. Dimensions are also forced even (4:2:0 encoders).
+const MIN_DIM: u64 = 640;
+
 /// Media parameters the host advertises in CONFIG (§3.4). Hardcoded to the v1
 /// quality bar for now; a TOML config (ARCHITECTURE §5.3) is not required until
 /// later milestones, so KISS — no config surface the ROADMAP doesn't ask for.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaParams {
     /// Chosen video codec (1 = HEVC).
     pub codec: u64,
@@ -74,6 +84,13 @@ pub enum Output {
     /// The client asked for a fresh IDR (§3.6). The driver forwards this to the
     /// running encoder, which codes the next frame as an IDR.
     RequestIdr,
+    /// A VIEWPORT-driven resolution change was ACKed (§8): reconfigure the
+    /// running media thread to `params`. The next encoded frame is an IDR with
+    /// the new parameter sets; `frame_seq` continues.
+    Reconfigure {
+        /// The new media parameters (already clamped, §3.10).
+        params: MediaParams,
+    },
     /// Reply to a CLOCK_PING (§7): echo `t0`; the driver stamps host receive/send
     /// times from the shared clock (the SM stays clock-free / sans-io).
     ClockPong {
@@ -145,6 +162,14 @@ pub struct HostSession {
     params: MediaParams,
     /// CONFIG generation, starts at 1, increments per CONFIG (§3.4 key 0).
     generation: u64,
+    /// Client's max decodable size (HELLO key 3), the ceiling for a VIEWPORT
+    /// clamp (§3.10). Captured on HELLO; defaults conservatively until then.
+    client_max_width: u64,
+    client_max_height: u64,
+    /// The generation of a mid-session reconfiguration whose CONFIG_ACK we are
+    /// still awaiting (§8). While set, media continues at the old resolution and
+    /// further VIEWPORT requests are ignored.
+    pending_generation: Option<u64>,
 }
 
 impl HostSession {
@@ -156,6 +181,9 @@ impl HostSession {
             session_id,
             params,
             generation: 0,
+            client_max_width: params.width,
+            client_max_height: params.height,
+            pending_generation: None,
         }
     }
 
@@ -200,10 +228,65 @@ impl HostSession {
         match msg_type {
             control::IDR_REQUEST => vec![Output::RequestIdr],
             control::STATS => vec![Output::Stats(StatsReport::from_body(body))],
+            control::VIEWPORT => self.on_viewport(body),
+            // A CONFIG_ACK here closes the mid-session reconfiguration gate (§8).
+            control::CONFIG_ACK => self.on_reconfig_ack(body),
             // INPUT is a valid streaming message we do not act on yet (M4).
             control::INPUT => Vec::new(),
             _ => self.protocol_violation(),
         }
+    }
+
+    /// VIEWPORT (§3.10): a best-effort request to stream at the client's window
+    /// size. Clamp it to host + client caps; if it names a genuinely new size and
+    /// no reconfiguration is already in flight, bump the generation and send the
+    /// new CONFIG (§8). Media keeps flowing at the old size until the ACK.
+    fn on_viewport(&mut self, body: &[(Value, Value)]) -> Vec<Output> {
+        let (rw, rh) = match (pair_elem(body, 0, 0), pair_elem(body, 0, 1)) {
+            (Some(w), Some(h)) => (w as u64, h as u64),
+            // Malformed request: it is best-effort, so ignore rather than error.
+            _ => return Vec::new(),
+        };
+
+        let (w, h) = self.clamp_viewport(rw, rh);
+        if self.pending_generation.is_some() || (w == self.params.width && h == self.params.height)
+        {
+            return Vec::new();
+        }
+
+        self.params.width = w;
+        self.params.height = h;
+        self.generation += 1;
+        self.pending_generation = Some(self.generation);
+
+        vec![Output::Send {
+            msg_type: control::CONFIG,
+            body: self.config_body(),
+        }]
+    }
+
+    /// CONFIG_ACK while streaming (§8): completes a pending reconfiguration. Only
+    /// the pending generation is valid; anything else is a violation.
+    fn on_reconfig_ack(&mut self, body: &[(Value, Value)]) -> Vec<Output> {
+        match (int_key(body, 0), self.pending_generation) {
+            (Some(g), Some(pending)) if g == pending as i128 => {
+                self.pending_generation = None;
+                vec![Output::Reconfigure {
+                    params: self.params,
+                }]
+            }
+            _ => self.protocol_violation(),
+        }
+    }
+
+    /// Clamp a requested VIEWPORT size to the host ceiling and the client's HELLO
+    /// max, flooring at [`MIN_DIM`] and forcing even dimensions for 4:2:0 (§3.10).
+    fn clamp_viewport(&self, w: u64, h: u64) -> (u64, u64) {
+        let max_w = HOST_MAX_WIDTH.min(self.client_max_width);
+        let max_h = HOST_MAX_HEIGHT.min(self.client_max_height);
+        let cw = w.clamp(MIN_DIM, max_w.max(MIN_DIM)) & !1;
+        let ch = h.clamp(MIN_DIM, max_h.max(MIN_DIM)) & !1;
+        (cw, ch)
     }
 
     /// HELLO handling (§3.4). Anything else here is a violation.
@@ -219,6 +302,13 @@ impl HostSession {
         // Key 2: preference-ordered codec list. Host encodes HEVC only in v1.
         if !offers_codec(body, CODEC_HEVC) {
             return self.fatal(errors::NO_COMMON_CODEC, "no common codec (host: HEVC)");
+        }
+
+        // Key 3: client's max decodable [width, height] — the ceiling a later
+        // VIEWPORT request (§3.10) is clamped to. Absent → keep the defaults.
+        if let (Some(w), Some(h)) = (pair_elem(body, 3, 0), pair_elem(body, 3, 1)) {
+            self.client_max_width = w as u64;
+            self.client_max_height = h as u64;
         }
 
         self.generation = 1;
@@ -305,6 +395,18 @@ impl HostSession {
 fn int_key(body: &[(Value, Value)], key: i128) -> Option<i128> {
     body.iter().find_map(|(k, v)| match (k, v) {
         (Value::Int(ki), Value::Int(vi)) if *ki == key => Some(*vi),
+        _ => None,
+    })
+}
+
+/// Element `idx` of a 2-int array body value (e.g. CONFIG key 2 / VIEWPORT key 0
+/// = [width, height]).
+fn pair_elem(body: &[(Value, Value)], key: i128, idx: usize) -> Option<i128> {
+    body.iter().find_map(|(k, v)| match (k, v) {
+        (Value::Int(ki), Value::Array(items)) if *ki == key => match items.get(idx) {
+            Some(Value::Int(vi)) => Some(*vi),
+            _ => None,
+        },
         _ => None,
     })
 }
@@ -464,6 +566,114 @@ mod tests {
             .on_frame(msg(control::INPUT, vec![(0, Value::Int(0))]))
             .is_empty());
         assert_eq!(s.state(), State::Streaming);
+    }
+
+    /// Drive a session to Streaming, advertising a client HELLO max of 2560×1440.
+    fn streaming_session() -> HostSession {
+        let mut s = new_session();
+        s.on_frame(Decoded::Message {
+            msg_type: control::HELLO,
+            body: vec![
+                (Value::Int(0), Value::Int(1)),
+                (Value::Int(1), Value::Text("test-client".into())),
+                (Value::Int(2), Value::Array(vec![Value::Int(1)])),
+                (
+                    Value::Int(3),
+                    Value::Array(vec![Value::Int(2560), Value::Int(1440)]),
+                ),
+            ],
+        });
+        s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(1))]));
+        assert_eq!(s.state(), State::Streaming);
+        s
+    }
+
+    fn viewport(w: i128, h: i128) -> Decoded {
+        msg(
+            control::VIEWPORT,
+            vec![(0, Value::Array(vec![Value::Int(w), Value::Int(h)]))],
+        )
+    }
+
+    #[test]
+    fn viewport_reconfigures_via_config_then_reconfigure() {
+        let mut s = streaming_session();
+
+        // A smaller window: within caps, so it is honored verbatim.
+        let out = s.on_frame(viewport(1920, 1080));
+        match out.as_slice() {
+            [Output::Send { msg_type, body }] if *msg_type == control::CONFIG => {
+                assert_eq!(int_key(body, 0), Some(2)); // generation bumped to 2
+                assert_eq!(pair_elem(body, 2, 0), Some(1920));
+                assert_eq!(pair_elem(body, 2, 1), Some(1080));
+            }
+            other => panic!("expected a CONFIG send, got {other:?}"),
+        }
+        assert_eq!(s.state(), State::Streaming); // media keeps flowing (§8)
+
+        // The client ACKs the new generation → reconfigure the media thread.
+        let out = s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(2))]));
+        match out.as_slice() {
+            [Output::Reconfigure { params }] => {
+                assert_eq!(params.width, 1920);
+                assert_eq!(params.height, 1080);
+            }
+            other => panic!("expected Reconfigure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewport_is_clamped_to_client_hello_max() {
+        let mut s = streaming_session();
+        // Move off the 2560×1440 default first so the clamp target differs from
+        // the current size (an equal size would be a no-op).
+        s.on_frame(viewport(1920, 1080));
+        s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(2))]));
+
+        // Request beyond the client's 2560×1440 decode max → clamped down to it.
+        let out = s.on_frame(viewport(7680, 4320));
+        match out.as_slice() {
+            [Output::Send { body, .. }] => {
+                assert_eq!(pair_elem(body, 2, 0), Some(2560));
+                assert_eq!(pair_elem(body, 2, 1), Some(1440));
+            }
+            other => panic!("expected a clamped CONFIG, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewport_matching_current_size_is_a_noop() {
+        let mut s = streaming_session();
+        // Default config is already 2560×1440.
+        let out = s.on_frame(viewport(2560, 1440));
+        assert!(out.is_empty());
+        assert_eq!(s.state(), State::Streaming);
+    }
+
+    #[test]
+    fn second_viewport_while_reconfig_pending_is_ignored() {
+        let mut s = streaming_session();
+        assert!(!s.on_frame(viewport(1920, 1080)).is_empty());
+        // A second request before the ACK is dropped (gate held, §8).
+        assert!(s.on_frame(viewport(1280, 720)).is_empty());
+    }
+
+    #[test]
+    fn malformed_viewport_is_ignored_not_fatal() {
+        let mut s = streaming_session();
+        // Missing the [w, h] array: best-effort request, so silently ignored.
+        let out = s.on_frame(msg(control::VIEWPORT, vec![(0, Value::Int(5))]));
+        assert!(out.is_empty());
+        assert_eq!(s.state(), State::Streaming);
+    }
+
+    #[test]
+    fn unexpected_config_ack_while_streaming_is_violation() {
+        let mut s = streaming_session();
+        // No reconfiguration pending → a CONFIG_ACK is a protocol violation.
+        let out = s.on_frame(msg(control::CONFIG_ACK, vec![(0, Value::Int(2))]));
+        assert_error_code(&out, errors::PROTOCOL_VIOLATION);
+        assert_eq!(s.state(), State::Closed);
     }
 
     #[test]
