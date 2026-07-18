@@ -441,7 +441,9 @@ fn open_source(
         }
         #[cfg(target_os = "macos")]
         CaptureSource::Sck => {
-            let capture = ScreenCapture::start(w, h, params.refresh as u32)?;
+            // Single-stream `--source sck` captures the main display (target None);
+            // the multi-display fan-out (M6.2) passes an explicit display id.
+            let capture = ScreenCapture::start(None, w, h, params.refresh as u32)?;
             Ok(Source::Sck {
                 capture,
                 frame: I420Buffer::new(w, h),

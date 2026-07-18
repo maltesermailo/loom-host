@@ -168,11 +168,19 @@ pub struct ScreenCapture {
 }
 
 impl ScreenCapture {
-    /// Start capturing the main display, scaled to `width`×`height`. Blocks
-    /// through display enumeration and stream start, so a missing Screen
-    /// Recording permission surfaces here rather than as black frames.
-    pub fn start(width: u32, height: u32, refresh: u32) -> Result<Self, CaptureError> {
-        let display = main_display()?;
+    /// Start capturing a display, scaled to `width`×`height`. `target` is the
+    /// `CGDirectDisplayID` to capture; `None` selects the main display (the M2.1
+    /// behavior). Blocks through display enumeration and stream start, so a
+    /// missing Screen Recording permission — or a target that no longer exists —
+    /// surfaces here rather than as black frames.
+    pub fn start(
+        target: Option<u32>,
+        width: u32,
+        height: u32,
+        refresh: u32,
+    ) -> Result<Self, CaptureError> {
+        let display = pick_display(target)?;
+        let display_id = unsafe { display.displayID() };
 
         let filter = unsafe {
             SCContentFilter::initWithDisplay_excludingWindows(
@@ -205,7 +213,7 @@ impl ScreenCapture {
         .map_err(|e| CaptureError::ScreenCaptureKit(format!("addStreamOutput: {e}")))?;
 
         start_capture(&stream)?;
-        tracing::info!(target: "loom::capture", width, height, refresh,
+        tracing::info!(target: "loom::capture", width, height, refresh, display_id,
             "ScreenCaptureKit capture started (420v)");
 
         Ok(Self {
@@ -258,9 +266,62 @@ fn configuration(width: u32, height: u32, refresh: u32) -> Retained<SCStreamConf
     config
 }
 
-/// The display to capture. M2.1 takes the first one SCK reports (the main
-/// display); picking among several is M6.4's selection UX.
-fn main_display() -> Result<Retained<SCDisplay>, CaptureError> {
+/// One capturable display, as reported by ScreenCaptureKit. `id` is the
+/// `CGDirectDisplayID` to pass back to [`ScreenCapture::start`] as its `target`;
+/// `width`/`height` are the display's native pixel size (before Loom's scaling).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayInfo {
+    /// The `CGDirectDisplayID`, stable while the display stays connected.
+    pub id: u32,
+    /// Native width in pixels.
+    pub width: u32,
+    /// Native height in pixels.
+    pub height: u32,
+}
+
+/// Enumerate the displays ScreenCaptureKit can capture, in SCK's order (index 0
+/// is the main display). This is how the multi-display fan-out (M6.2) discovers
+/// which `CGDirectDisplayID`s exist to stream. Blocks on SCK's async enumeration,
+/// so a missing Screen Recording permission surfaces here.
+pub fn displays() -> Result<Vec<DisplayInfo>, CaptureError> {
+    let content = shareable_content()?;
+    let list = unsafe { content.displays() };
+
+    let mut out = Vec::with_capacity(list.count());
+    for d in list.iter() {
+        // SAFETY: the accessors are read-only and `d` is a live SCDisplay.
+        unsafe {
+            out.push(DisplayInfo {
+                id: d.displayID(),
+                width: d.width() as u32,
+                height: d.height() as u32,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a `target` `CGDirectDisplayID` to its [`SCDisplay`]. `None` selects the
+/// main display (SCK's first, the M2.1 behavior); an id that no longer exists is
+/// a [`CaptureError::DisplayNotFound`] rather than a silent fall-back to main.
+fn pick_display(target: Option<u32>) -> Result<Retained<SCDisplay>, CaptureError> {
+    let content = shareable_content()?;
+    let list = unsafe { content.displays() };
+
+    match target {
+        None => list
+            .firstObject()
+            .ok_or_else(|| CaptureError::ScreenCaptureKit("no displays available to capture".into())),
+        Some(id) => list
+            .iter()
+            .find(|d| unsafe { d.displayID() } == id)
+            .ok_or(CaptureError::DisplayNotFound(id)),
+    }
+}
+
+/// Fetch the current [`SCShareableContent`], blocking on SCK's async enumeration
+/// (bounded by [`REPLY_TIMEOUT`]). Shared by [`displays`] and [`pick_display`].
+fn shareable_content() -> Result<Retained<SCShareableContent>, CaptureError> {
     let (tx, rx) = mpsc::channel();
     let handler = RcBlock::new(
         move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -282,13 +343,8 @@ fn main_display() -> Result<Retained<SCDisplay>, CaptureError> {
 
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 
-    let content = rx
-        .recv_timeout(REPLY_TIMEOUT)
-        .map_err(|_| CaptureError::ScreenCaptureKit("timed out enumerating displays".into()))??;
-
-    unsafe { content.displays() }
-        .firstObject()
-        .ok_or_else(|| CaptureError::ScreenCaptureKit("no displays available to capture".into()))
+    rx.recv_timeout(REPLY_TIMEOUT)
+        .map_err(|_| CaptureError::ScreenCaptureKit("timed out enumerating displays".into()))?
 }
 
 /// Start the stream, blocking until SCK confirms (or refuses).

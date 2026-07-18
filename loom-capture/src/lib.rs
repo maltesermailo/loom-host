@@ -46,7 +46,7 @@ use std::thread::JoinHandle;
 
 pub use frame::I420Buffer;
 #[cfg(target_os = "macos")]
-pub use sck::ScreenCapture;
+pub use sck::{displays, DisplayInfo, ScreenCapture};
 
 /// Errors from the capture pipeline.
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +82,11 @@ pub enum CaptureError {
     /// ScreenCaptureKit setup or streaming failed.
     #[error("ScreenCaptureKit: {0}")]
     ScreenCaptureKit(String),
+    /// A capture target `CGDirectDisplayID` was requested that no connected
+    /// display reports (e.g. it was unplugged, or a virtual display was torn
+    /// down between enumeration and capture). Multi-display, §M6.2.
+    #[error("display {0} not found (disconnected, or never existed)")]
+    DisplayNotFound(u32),
 }
 
 #[cfg(target_os = "linux")]
