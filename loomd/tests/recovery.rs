@@ -59,6 +59,8 @@ fn spawn_host(drop_percent: u32, encoder: loomd::media::EncoderKind) -> std::net
             },
             source: loomd::media::CaptureSource::Synthetic,
             display: None,
+            x: 0,
+            y: 0,
         }],
         encoder,
         drop_percent,

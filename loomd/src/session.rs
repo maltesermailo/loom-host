@@ -83,6 +83,11 @@ pub struct StreamConfig {
     pub stream_id: u16,
     /// Per-stream media parameters (its own native size, refresh, bitrate).
     pub params: MediaParams,
+    /// This display's top-left position in the host's global layout (main display
+    /// at the origin), so the client can place its panel to match (§3.4 key 4).
+    pub x: i32,
+    /// This display's top position in the host's global layout.
+    pub y: i32,
 }
 
 /// An instruction from the state machine to its async driver, in order.
@@ -451,6 +456,11 @@ impl HostSession {
                         ),
                         (Value::Int(2), Value::Int(s.params.refresh as i128)),
                         (Value::Int(3), Value::Int(s.params.bitrate_kbps as i128)),
+                        // Key 4: display position in the host's global layout (§3.4).
+                        (
+                            Value::Int(4),
+                            Value::Array(vec![Value::Int(s.x as i128), Value::Int(s.y as i128)]),
+                        ),
                     ])
                 })
                 .collect();
@@ -557,6 +567,8 @@ mod tests {
                 height: 1080,
                 ..MediaParams::default()
             },
+            x: -1920,
+            y: 0,
         };
         HostSession::new("test-host", [0u8; 16], MediaParams::default(), vec![extra])
     }

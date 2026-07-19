@@ -43,6 +43,8 @@ fn spawn_host() -> SocketAddr {
             },
             source: loomd::media::CaptureSource::Synthetic,
             display: None,
+            x: 0,
+            y: 0,
         }],
         encoder: loomd::media::EncoderKind::X265,
         drop_percent: 0,

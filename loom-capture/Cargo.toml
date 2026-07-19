@@ -19,8 +19,13 @@ tokio.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 # `objc2-core-graphics` unlocks SCDisplay::displayID() (the CGDirectDisplayID a
-# capture target is named by, M6.2 multi-display); the workspace set omits it.
-objc2-screen-capture-kit = { workspace = true, features = ["objc2-core-graphics"] }
+# capture target is named by, M6.2); `objc2-core-foundation` unlocks
+# SCDisplay::frame() (the display's position in the global layout, M6.3 immersive
+# placement). The workspace set omits both.
+objc2-screen-capture-kit = { workspace = true, features = [
+    "objc2-core-graphics",
+    "objc2-core-foundation",
+] }
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 block2.workspace = true

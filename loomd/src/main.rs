@@ -171,6 +171,8 @@ fn resolve_streams(args: &Args) -> Result<Vec<StreamSpec>, String> {
             params: base,
             source: args.source,
             display: None,
+            x: 0,
+            y: 0,
         }]);
     }
 
@@ -217,6 +219,8 @@ fn resolve_streams(args: &Args) -> Result<Vec<StreamSpec>, String> {
                 },
                 source: CaptureSource::Sck,
                 display: Some(d.id),
+                x: d.x,
+                y: d.y,
             })
             .collect();
         Ok(streams)

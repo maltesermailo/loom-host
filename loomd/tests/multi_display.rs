@@ -43,6 +43,8 @@ fn spawn_host() -> SocketAddr {
         },
         source: CaptureSource::Synthetic,
         display: None,
+        x: 0,
+        y: 0,
     };
     let cfg = HostCfg {
         name: "multi-host".into(),

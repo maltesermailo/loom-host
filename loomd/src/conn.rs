@@ -35,6 +35,11 @@ pub struct StreamSpec {
     pub source: media::CaptureSource,
     /// `CGDirectDisplayID` to capture (SCK only); `None` = main / source default.
     pub display: Option<u32>,
+    /// Top-left position in the host's global display layout (main display at the
+    /// origin). Advertised to the client so it lays panels out to match (M6.3).
+    pub x: i32,
+    /// Top position in the host's global display layout.
+    pub y: i32,
 }
 
 /// Immutable per-daemon settings handed to each connection.
@@ -66,6 +71,8 @@ impl HostCfg {
             .map(|s| StreamConfig {
                 stream_id: s.stream_id,
                 params: s.params,
+                x: s.x,
+                y: s.y,
             })
             .collect()
     }

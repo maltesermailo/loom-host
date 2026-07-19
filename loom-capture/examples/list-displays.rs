@@ -13,7 +13,10 @@ fn main() {
             println!("{} display(s):", displays.len());
             for (i, d) in displays.iter().enumerate() {
                 let role = if i == 0 { " (main)" } else { "" };
-                println!("  [{i}] id={} {}x{}{role}", d.id, d.width, d.height);
+                println!(
+                    "  [{i}] id={} {}x{} @({},{}){role}",
+                    d.id, d.width, d.height, d.x, d.y
+                );
             }
         }
         Err(e) => {

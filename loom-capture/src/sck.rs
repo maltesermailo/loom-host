@@ -277,6 +277,12 @@ pub struct DisplayInfo {
     pub width: u32,
     /// Native height in pixels.
     pub height: u32,
+    /// Top-left position in the global display layout (the main display is at the
+    /// origin; displays to its left have a negative `x`). Drives immersive panel
+    /// placement so the headset layout matches System Settings ▸ Displays (M6.3).
+    pub x: i32,
+    /// Top position in the global display layout.
+    pub y: i32,
 }
 
 /// Enumerate the displays ScreenCaptureKit can capture, in SCK's order (index 0
@@ -291,10 +297,13 @@ pub fn displays() -> Result<Vec<DisplayInfo>, CaptureError> {
     for d in list.iter() {
         // SAFETY: the accessors are read-only and `d` is a live SCDisplay.
         unsafe {
+            let frame = d.frame();
             out.push(DisplayInfo {
                 id: d.displayID(),
                 width: d.width() as u32,
                 height: d.height() as u32,
+                x: frame.origin.x as i32,
+                y: frame.origin.y as i32,
             });
         }
     }
